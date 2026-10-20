@@ -1,0 +1,6 @@
+{
+  "summary": "Complete architectural remake of EYE Planning Software: Server-side Next.js API routes with Supabase Service Key bypassing RLS for guaranteed cloud persistence; clean date register with QTY, Input, Expected, Actual, and Balance (no artificial targets); custom EYE SVG logo; multi-DC management with real CRUD; fixed admin authentication (usman@gmail.com / admin786); and comprehensive SQL setup script.",
+  "updatedAt": "2026-10-14T08:03:05.775116448Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "EYE Planning Software",
+  "description": "Date-wise garment manufacturing planning ledger and delivery challan (DC) tracking system for Denim Crafts with real-time balance calculations, Supabase integration, and multi-user access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
