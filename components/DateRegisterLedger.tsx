@@ -87,6 +87,16 @@ export function DateRegisterLedger({
   const [isEditingOrderDate, setIsEditingOrderDate] = useState(false);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [isAutoScheduleModalOpen, setIsAutoScheduleModalOpen] = useState(false);
+  const [modalTargetRate, setModalTargetRate] = useState<number>(800);
+  const [autoScheduleNotification, setAutoScheduleNotification] = useState<{
+    days: number;
+    rate: number;
+    remainder: number;
+    endDateLabel: string;
+    startRowId: string;
+    previousExpectedRows: { id: string; val: number | null }[];
+  } | null>(null);
 
   const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const rowsRef = useRef<PlanningRow[]>(rows);
@@ -200,14 +210,15 @@ export function DateRegisterLedger({
     for (let i = 0; i < sorted.length; i++) {
       const row = sorted[i];
 
-      // First active row of the order receives opening input
+      // First active row of the order receives opening lot QTY plus any Day 1 extra input
       if (i === 0) {
-        const firstInput =
-          row.inputQty !== null && row.inputQty !== undefined
+        const day1ExtraInput =
+          row.inputQty !== null && row.inputQty !== undefined && Number(row.inputQty) > 0
             ? Number(row.inputQty)
-            : challan.openingQty;
-        curBal = firstInput;
-        totInput = firstInput;
+            : 0;
+        const totalOpeningLot = (challan.openingQty || 0) + day1ExtraInput;
+        curBal = totalOpeningLot;
+        totInput = totalOpeningLot;
       } else if (
         row.inputQty !== null &&
         row.inputQty !== undefined &&
@@ -228,7 +239,7 @@ export function DateRegisterLedger({
         totExpected += Number(row.expectedOutput);
       }
 
-      // Calculate calendar day gap from last active output date
+      // Calculate calendar day gap from last active output date (or order start date)
       let calculatedGap = 0;
       if (
         row.actualOutput !== null &&
@@ -236,10 +247,20 @@ export function DateRegisterLedger({
         Number(row.actualOutput) > 0
       ) {
         if (lastActiveDateStr) {
+          // Gap between consecutive output dates
           const prevTime = new Date(lastActiveDateStr).getTime();
           const currTime = new Date(row.dateStr).getTime();
           const diffDays = Math.round((currTime - prevTime) / (1000 * 60 * 60 * 24));
           calculatedGap = Math.max(0, diffDays - 1);
+        } else {
+          // Gap from order start date to the FIRST actual output date
+          const orderStartStr = sorted[0]?.dateStr || challan.orderDate;
+          if (orderStartStr) {
+            const orderStartTime = new Date(orderStartStr).getTime();
+            const currTime = new Date(row.dateStr).getTime();
+            const diffDays = Math.round((currTime - orderStartTime) / (1000 * 60 * 60 * 24));
+            calculatedGap = diffDays;
+          }
         }
         lastActiveDateStr = row.dateStr;
       }
@@ -298,7 +319,102 @@ export function DateRegisterLedger({
         completionRate,
       },
     };
-  }, [rows, challan.openingQty]);
+  }, [rows, challan.openingQty, challan.orderDate]);
+
+  // Auto-schedule expected quota calculation helper
+  // Divides available balance by daily target rate, skips Sundays, remainder on final day
+  const autoScheduleExpectedQuota = useCallback(
+    (
+      currentRows: PlanningRow[],
+      startRowId: string,
+      targetRate: number,
+      startingBalance: number
+    ): {
+      updatedRowsList: PlanningRow[];
+      scheduledDays: number;
+      remainder: number;
+      endDayLabel: string;
+    } => {
+      let list = [...currentRows].sort(
+        (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+      );
+      const targetIdx = list.findIndex((r) => r.id === startRowId);
+      if (targetIdx === -1 || targetRate <= 0 || startingBalance <= 0) {
+        return { updatedRowsList: currentRows, scheduledDays: 0, remainder: 0, endDayLabel: '' };
+      }
+
+      const daysNeeded = Math.ceil(startingBalance / targetRate);
+      let remainingQuota = startingBalance;
+      let workingDaysAllocated = 0;
+      let currIdx = targetIdx;
+      let endDayLabel = '';
+      let iterations = 0;
+      const maxIterations = 180;
+
+      while (remainingQuota > 0 && workingDaysAllocated < daysNeeded && iterations < maxIterations) {
+        iterations++;
+        if (currIdx >= list.length) {
+          list = addNextDayToRows(challan, list);
+        }
+
+        const row = list[currIdx];
+        const d = new Date(row.dateStr);
+        const isSunday = d.getDay() === 0;
+
+        if (isSunday) {
+          list[currIdx] = { ...row, expectedOutput: null };
+          currIdx++;
+          continue;
+        }
+
+        workingDaysAllocated++;
+        endDayLabel = row.dayLabel || row.dateStr;
+
+        if (workingDaysAllocated === daysNeeded || remainingQuota <= targetRate) {
+          list[currIdx] = { ...row, expectedOutput: remainingQuota };
+          remainingQuota = 0;
+        } else {
+          list[currIdx] = { ...row, expectedOutput: targetRate };
+          remainingQuota -= targetRate;
+        }
+
+        currIdx++;
+      }
+
+      const finalRemainder = startingBalance - targetRate * (workingDaysAllocated - 1);
+
+      return {
+        updatedRowsList: list,
+        scheduledDays: workingDaysAllocated,
+        remainder: finalRemainder > 0 && finalRemainder !== targetRate ? finalRemainder : 0,
+        endDayLabel,
+      };
+    },
+    [challan]
+  );
+
+  const handleUndoAutoSchedule = () => {
+    if (!autoScheduleNotification) return;
+    const prevMap = new Map(
+      autoScheduleNotification.previousExpectedRows.map((p) => [p.id, p.val])
+    );
+    const reverted = rows.map((r) => {
+      if (prevMap.has(r.id)) {
+        return { ...r, expectedOutput: prevMap.get(r.id) ?? null };
+      }
+      return r;
+    });
+    setRows(reverted);
+    setAutoScheduleNotification(null);
+    saveCompletePlanToSupabase(reverted);
+  };
+
+  const handleClearSchedule = () => {
+    const cleared = rows.map((r) => ({ ...r, expectedOutput: null }));
+    setRows(cleared);
+    setAutoScheduleNotification(null);
+    saveCompletePlanToSupabase(cleared);
+  };
 
   // Handle cell value changes immediately in state, with debounced auto-save to Supabase
   const handleCellChange = (
@@ -306,7 +422,8 @@ export function DateRegisterLedger({
     field: 'inputQty' | 'expectedOutput' | 'actualOutput' | 'buyerNotes' | 'status',
     value: string
   ) => {
-    const nextRows = rows.map((r) => {
+    const numVal = value.trim() === '' ? null : Number(value);
+    let nextRows = rows.map((r) => {
       if (r.id !== rowId) return r;
 
       if (field === 'status') {
@@ -317,7 +434,6 @@ export function DateRegisterLedger({
         return { ...r, buyerNotes: value.trim() === '' ? null : value };
       }
 
-      const numVal = value.trim() === '' ? null : Number(value);
       if (field === 'inputQty') {
         return { ...r, inputQty: numVal };
       }
@@ -329,6 +445,48 @@ export function DateRegisterLedger({
       }
       return r;
     });
+
+    // Automatically trigger expected schedule if user types first daily expected rate
+    if (field === 'expectedOutput' && numVal !== null && numVal > 0) {
+      const sorted = [...nextRows].sort(
+        (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+      );
+      const targetIdx = sorted.findIndex((r) => r.id === rowId);
+
+      // Only auto-fill if subsequent 1-3 working rows have no expected output
+      const downstreamHasValues = sorted
+        .slice(targetIdx + 1, targetIdx + 4)
+        .some(
+          (r) =>
+            r.expectedOutput !== null &&
+            r.expectedOutput !== undefined &&
+            Number(r.expectedOutput) > 0
+        );
+
+      if (!downstreamHasValues && targetIdx !== -1) {
+        // Balance available for this production period
+        let startingBal = challan.openingQty || 0;
+        if (targetIdx > 0 && updatedRows[targetIdx - 1]?.balance > 0) {
+          startingBal = updatedRows[targetIdx - 1].balance;
+        } else if (updatedRows[targetIdx]?.balance > 0) {
+          startingBal = updatedRows[targetIdx].balance;
+        }
+
+        if (startingBal > 0) {
+          const prevExpected = sorted.map((r) => ({ id: r.id, val: r.expectedOutput ?? null }));
+          const result = autoScheduleExpectedQuota(nextRows, rowId, numVal, startingBal);
+          nextRows = result.updatedRowsList;
+          setAutoScheduleNotification({
+            days: result.scheduledDays,
+            rate: numVal,
+            remainder: result.remainder,
+            endDateLabel: result.endDayLabel,
+            startRowId: rowId,
+            previousExpectedRows: prevExpected,
+          });
+        }
+      }
+    }
 
     setRows(nextRows);
     setHasUnsavedChanges(true);
@@ -983,6 +1141,15 @@ export function DateRegisterLedger({
             <div className="h-4 w-px bg-slate-300 mx-0.5 hidden sm:block" />
             <button
               type="button"
+              onClick={() => setIsAutoScheduleModalOpen(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+              title="Auto-calculate Expected Output schedule by daily target rate"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+              <span>Auto-Schedule Quota</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setIsPrintModalOpen(true)}
               className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
               title="Print Sheet / PDF Report"
@@ -1017,27 +1184,67 @@ export function DateRegisterLedger({
           </div>
         </div>
 
+        {/* Auto-Schedule Notification Banner with Undo Option */}
+        {autoScheduleNotification && (
+          <div className="bg-sky-50 border-b border-sky-200 px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-sky-600 shrink-0" />
+              <span className="text-sky-950 font-medium">
+                <strong>Auto-Scheduled Expected Output:</strong> {autoScheduleNotification.days} working days at{' '}
+                <strong>{autoScheduleNotification.rate.toLocaleString()} pcs/day</strong>
+                {autoScheduleNotification.remainder > 0 && (
+                  <span> (Final day remainder: <strong>{autoScheduleNotification.remainder.toLocaleString()} pcs</strong>)</span>
+                )}
+                {autoScheduleNotification.endDateLabel && (
+                  <span> • Estimated Completion: <strong>{autoScheduleNotification.endDateLabel}</strong></span>
+                )}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleUndoAutoSchedule}
+                className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+              >
+                Undo Auto-Fill
+              </button>
+              <button
+                type="button"
+                onClick={() => setAutoScheduleNotification(null)}
+                className="text-slate-400 hover:text-slate-600 p-0.5"
+                title="Dismiss notice"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead className="bg-slate-100/90 border-b border-slate-300 text-slate-700 font-bold uppercase text-[11px] tracking-wider divide-x divide-slate-200">
+          <table className="w-full text-left text-sm border-collapse min-w-[1150px]">
+            <thead className="bg-slate-100/95 border-b border-slate-300 text-slate-800 font-extrabold uppercase text-xs sm:text-[13px] tracking-wider divide-x divide-slate-200 sticky top-0 z-10 shadow-2xs">
               <tr>
-                <th className="py-2.5 px-3 text-center w-24">Date</th>
-                <th className="py-2.5 px-3 text-center w-16">Day</th>
-                <th className="py-2.5 px-3 text-center w-20">DC #</th>
-                <th className="py-2.5 px-3 text-right w-24">QTY</th>
-                <th className="py-2.5 px-3 text-right w-28">INPUT</th>
-                <th className="py-2.5 px-3 text-center w-20">DAYS GAP</th>
-                <th className="py-2.5 px-3 text-right w-32">EXPECTED</th>
-                <th className="py-2.5 px-3 text-right w-32">ACTUAL</th>
+                <th className="py-3 px-3 text-center w-28">Date</th>
+                <th className="py-3 px-2 text-center w-16">Day</th>
+                <th className="py-3 px-3 text-center w-24">DC #</th>
+                <th className="py-3 px-3 text-right w-28">QTY</th>
+                <th className="py-3 px-3 text-right w-32">INPUT</th>
+                <th className="py-3 px-2 text-center w-20">DAYS GAP</th>
+                <th className="py-3 px-3 text-right w-40 bg-indigo-50/70 text-indigo-950 font-black">
+                  EXPECTED OUTPUT
+                </th>
+                <th className="py-3 px-3 text-right w-40 bg-emerald-50/70 text-emerald-950 font-black">
+                  ACTUAL OUTPUT
+                </th>
                 {/* CALCULATION OF EXPECTED AND ACTUAL DIFFERENCE */}
-                <th className="py-2.5 px-3 text-right w-32 bg-sky-50 text-sky-950 font-black">
+                <th className="py-3 px-3 text-right w-36 bg-sky-50 text-sky-950 font-black">
                   DIFF (ACTUAL - EXP)
                 </th>
-                <th className="py-2.5 px-3 text-right w-32 bg-slate-200/70 text-slate-900 font-black">
+                <th className="py-3 px-3 text-right w-36 bg-slate-200/80 text-slate-900 font-black">
                   BALANCE
                 </th>
                 {/* STATUS COLUMN (DROPDOWN MENU: Process | Inline | Complete) */}
-                <th className="py-2.5 px-3 text-center w-36 bg-amber-50/70 text-amber-950 font-black">
+                <th className="py-3 px-3 text-center w-36 bg-amber-50/80 text-amber-950 font-black">
                   STATUS
                 </th>
               </tr>
@@ -1109,8 +1316,8 @@ export function DateRegisterLedger({
                       }`}
                     >
                       {/* Date */}
-                      <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 whitespace-nowrap">
-                        <div className="flex items-center justify-center gap-1">
+                      <td className="py-3 px-3 text-center font-mono font-bold text-xs sm:text-sm text-slate-900 whitespace-nowrap">
+                        <div className="flex items-center justify-center gap-1.5">
                           <span>{row.dayLabel}</span>
                           {/* Show small delete button if row is past order month */}
                           {index >= 30 && (
@@ -1119,7 +1326,7 @@ export function DateRegisterLedger({
                               title="Remove this extra date row"
                               className="text-slate-300 hover:text-rose-600 transition-colors p-0.5 cursor-pointer"
                             >
-                              <X className="w-3 h-3" />
+                              <X className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>
@@ -1127,25 +1334,25 @@ export function DateRegisterLedger({
 
                       {/* Day */}
                       <td
-                        className={`py-2 px-3 text-center font-medium ${
-                          isSunday ? 'text-rose-600 font-bold' : 'text-slate-500'
+                        className={`py-3 px-2 text-center font-bold text-xs sm:text-sm ${
+                          isSunday ? 'text-rose-600 bg-rose-50/40' : 'text-slate-600'
                         }`}
                       >
                         {dayOfWeek}
                       </td>
 
                       {/* DC # (Shown on the first day of the order) */}
-                      <td className="py-2 px-3 text-center font-mono font-bold text-slate-700">
+                      <td className="py-3 px-3 text-center font-mono font-bold text-xs sm:text-sm text-slate-800">
                         {isFirstRowOfOrder ? challan.dcNo : ''}
                       </td>
 
                       {/* QTY (Initial Opening Qty on the first day of the order) */}
-                      <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700 font-medium">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800 font-bold text-xs sm:text-sm">
                         {isFirstRowOfOrder ? challan.openingQty.toLocaleString() : ''}
                       </td>
 
                       {/* INPUT */}
-                      <td className="py-2 px-2 text-right">
+                      <td className="py-2.5 px-2 text-right">
                         <input
                           type="number"
                           placeholder="—"
@@ -1159,18 +1366,18 @@ export function DateRegisterLedger({
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                           }}
-                          className={`w-24 px-2 py-1 text-xs border rounded text-right font-mono font-bold focus:outline-none focus:ring-1 focus:ring-sky-500 bg-white ${
+                          className={`w-28 sm:w-32 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold focus:outline-none focus:ring-2 focus:ring-sky-500 bg-white transition-all ${
                             (row.inputQty || 0) > 0
-                              ? 'border-sky-400 text-sky-950 bg-sky-50/50'
+                              ? 'border-sky-400 text-sky-950 bg-sky-50/70'
                               : 'border-slate-300 text-slate-700'
                           }`}
                         />
                       </td>
 
                       {/* DAYS GAP */}
-                      <td className="py-2 px-3 text-center font-mono tabular-nums">
+                      <td className="py-3 px-2 text-center font-mono tabular-nums text-xs sm:text-sm">
                         {row.daysGap && row.daysGap > 0 ? (
-                          <span className="bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold text-[11px]">
+                          <span className="bg-amber-100 text-amber-900 px-2 py-0.5 rounded font-black text-xs">
                             {row.daysGap}d
                           </span>
                         ) : (
@@ -1179,10 +1386,11 @@ export function DateRegisterLedger({
                       </td>
 
                       {/* EXPECTED OUTPUT */}
-                      <td className="py-2 px-2 text-right">
+                      <td className="py-2.5 px-2 text-right">
                         <input
                           type="number"
-                          placeholder="—"
+                          placeholder={isSunday ? 'OFF' : '—'}
+                          disabled={isSunday}
                           value={
                             row.expectedOutput !== null && row.expectedOutput !== undefined
                               ? row.expectedOutput
@@ -1195,12 +1403,18 @@ export function DateRegisterLedger({
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                           }}
-                          className="w-28 px-2 py-1 text-xs border border-slate-300 rounded text-right font-mono font-bold text-indigo-900 focus:outline-none focus:ring-1 focus:ring-sky-500 bg-white"
+                          className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white transition-all ${
+                            isSunday
+                              ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed font-medium'
+                              : (row.expectedOutput || 0) > 0
+                              ? 'border-indigo-400 text-indigo-950 bg-indigo-50/50'
+                              : 'border-slate-300 text-slate-700'
+                          }`}
                         />
                       </td>
 
                       {/* ACTUAL OUTPUT */}
-                      <td className="py-2 px-2 text-right">
+                      <td className="py-2.5 px-2 text-right">
                         <input
                           type="number"
                           placeholder="—"
@@ -1214,27 +1428,27 @@ export function DateRegisterLedger({
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                           }}
-                          className={`w-28 px-2 py-1 text-xs border rounded text-right font-mono font-bold focus:outline-none focus:ring-1 focus:ring-sky-500 bg-white ${
+                          className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white transition-all ${
                             (row.actualOutput || 0) > 0
-                              ? 'border-emerald-500 text-emerald-950 bg-emerald-50/40'
+                              ? 'border-emerald-500 text-emerald-950 bg-emerald-50/50'
                               : 'border-slate-300 text-slate-700'
                           }`}
                         />
                       </td>
 
                       {/* CALCULATION OF EXPECTED AND ACTUAL DIFFERENCE (DIFF = ACTUAL - EXPECTED) */}
-                      <td className="py-2 px-3 text-right font-mono tabular-nums">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-xs sm:text-sm">
                         {hasValues ? (
                           <span
-                            className={`inline-block px-2 py-0.5 rounded font-bold text-xs ${
+                            className={`inline-block px-2.5 py-1 rounded font-black text-xs sm:text-sm ${
                               dailyDiff > 0
-                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
                                 : dailyDiff < 0
-                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                ? 'bg-rose-100 text-rose-900 border border-rose-300'
                                 : 'bg-slate-100 text-slate-700 border border-slate-200'
                             }`}
                           >
-                            {dailyDiff > 0 ? `+${dailyDiff}` : dailyDiff}
+                            {dailyDiff > 0 ? `+${dailyDiff.toLocaleString()}` : dailyDiff.toLocaleString()}
                           </span>
                         ) : (
                           <span className="text-slate-300 font-mono">—</span>
@@ -1243,7 +1457,7 @@ export function DateRegisterLedger({
 
                       {/* BALANCE */}
                       <td
-                        className={`py-2 px-3 text-right font-mono font-bold text-sm tabular-nums ${
+                        className={`py-3 px-3 text-right font-mono font-black text-sm sm:text-base tabular-nums ${
                           isZeroRow
                             ? 'text-rose-950 font-black'
                             : row.balance === 0
@@ -1255,14 +1469,13 @@ export function DateRegisterLedger({
                       </td>
 
                       {/* STITCHING STATUS (INLINE DROPDOWN MENU: Process | Inline | Complete) */}
-                      {/* CRITICAL FIX: Replaces static 'Stitched' with interactive dropdown menu */}
-                      <td className="py-1.5 px-2 text-center">
+                      <td className="py-2 px-2 text-center">
                         <select
                           value={currentStatus}
                           onChange={(e) =>
                             handleCellChange(row.id, 'status', e.target.value)
                           }
-                          className={`w-full max-w-[115px] px-2 py-1 text-xs font-bold rounded-md border cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-500 shadow-2xs transition-colors ${
+                          className={`w-full max-w-[130px] px-2.5 py-1.5 text-xs sm:text-sm font-bold rounded-lg border cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-500 shadow-2xs transition-colors ${
                             currentStatus === 'Complete'
                               ? 'bg-emerald-100 text-emerald-900 border-emerald-400 hover:bg-emerald-200'
                               : currentStatus === 'Inline'
@@ -1573,6 +1786,137 @@ export function DateRegisterLedger({
               >
                 Confirm Delete
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-Schedule Expected Quota Modal */}
+      {isAutoScheduleModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2 text-slate-900 font-bold text-base">
+                <Sparkles className="w-5 h-5 text-amber-500" />
+                <span>Auto-Schedule Expected Quota</span>
+              </div>
+              <button
+                onClick={() => setIsAutoScheduleModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-600">
+                Automatically calculate and populate daily Expected Output quotas based on your daily stitching target.
+                Sundays are automatically skipped as off-days, and any remaining balance is allocated to the final day.
+              </p>
+
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5 font-mono text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Current Production Balance:</span>
+                  <span className="font-bold text-slate-900">
+                    {(totals.currentBalance || challan.openingQty).toLocaleString()} Pcs
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Estimated Working Days:</span>
+                  <span className="font-bold text-sky-700">
+                    {modalTargetRate > 0
+                      ? Math.ceil((totals.currentBalance || challan.openingQty) / modalTargetRate)
+                      : 0}{' '}
+                    Working Days
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1 uppercase text-[11px] tracking-wide">
+                  Daily Target Quota (Pcs / Day)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={modalTargetRate}
+                  onChange={(e) => setModalTargetRate(Math.max(1, Number(e.target.value)))}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-slate-900 font-bold font-mono text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  placeholder="e.g. 800"
+                />
+              </div>
+
+              {/* Quick Rate Presets */}
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-slate-500 text-[11px]">Presets:</span>
+                {[500, 650, 800, 1000, 1200].map((rate) => (
+                  <button
+                    key={rate}
+                    type="button"
+                    onClick={() => setModalTargetRate(rate)}
+                    className={`px-2.5 py-1 rounded text-xs font-bold border transition-colors cursor-pointer ${
+                      modalTargetRate === rate
+                        ? 'bg-sky-600 text-white border-sky-600 shadow-2xs'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    {rate}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center pt-3 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => {
+                  handleClearSchedule();
+                  setIsAutoScheduleModalOpen(false);
+                }}
+                className="text-xs text-rose-600 hover:text-rose-700 font-bold cursor-pointer"
+              >
+                Clear Schedule
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAutoScheduleModalOpen(false)}
+                  className="px-3.5 py-1.5 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (rows.length === 0 || modalTargetRate <= 0) return;
+                    const sorted = [...rows].sort(
+                      (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+                    );
+                    const firstRow = sorted[0];
+                    const startingBal = totals.currentBalance > 0 ? totals.currentBalance : challan.openingQty;
+                    const result = autoScheduleExpectedQuota(
+                      rows,
+                      firstRow.id,
+                      modalTargetRate,
+                      startingBal
+                    );
+                    setRows(result.updatedRowsList);
+                    setAutoScheduleNotification({
+                      days: result.scheduledDays,
+                      rate: modalTargetRate,
+                      remainder: result.remainder,
+                      endDateLabel: result.endDayLabel,
+                      startRowId: firstRow.id,
+                      previousExpectedRows: sorted.map((r) => ({ id: r.id, val: r.expectedOutput ?? null })),
+                    });
+                    saveCompletePlanToSupabase(result.updatedRowsList);
+                    setIsAutoScheduleModalOpen(false);
+                  }}
+                  className="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-bold cursor-pointer shadow-xs"
+                >
+                  Apply Schedule
+                </button>
+              </div>
             </div>
           </div>
         </div>

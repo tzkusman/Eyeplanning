@@ -409,8 +409,8 @@ export function PrintRegisterModal({
                     <th className="py-2.5 px-2 text-right border border-slate-700 w-20">Initial</th>
                     <th className="py-2.5 px-2 text-right border border-slate-700 w-20">Input</th>
                     <th className="py-2.5 px-2 text-center border border-slate-700 w-12">Gap</th>
-                    <th className="py-2.5 px-2 text-right border border-slate-700 w-24">Expected</th>
-                    <th className="py-2.5 px-2 text-right border border-slate-700 w-24">Actual</th>
+                    <th className="py-2.5 px-2 text-right border border-slate-700 w-28">Expected Output</th>
+                    <th className="py-2.5 px-2 text-right border border-slate-700 w-28">Actual Output</th>
                     <th className="py-2.5 px-2 text-right border border-slate-700 w-28 bg-slate-800 text-sky-300">
                       Diff (Act - Exp)
                     </th>

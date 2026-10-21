@@ -451,8 +451,14 @@ export default function HomePage() {
         lastLiveSyncTime={lastLiveSyncTime}
       />
 
-      {/* Main Viewport Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+      {/* Main Viewport Container - Edge-to-Edge Fluid for Date Register Ledger */}
+      <main
+        className={`flex-1 w-full mx-auto transition-all ${
+          activeView === 'register'
+            ? 'w-full max-w-none px-2 sm:px-4 lg:px-6 py-3 sm:py-5'
+            : 'max-w-7xl p-4 sm:p-6 lg:p-8'
+        }`}
+      >
         {/* VIEW 1: PRODUCTION PLANNING REGISTER & BALANCES */}
         {activeView === 'register' && activeChallan && (
           <DateRegisterLedger

@@ -87,6 +87,26 @@ A production planning ledger and Delivery Challan (DC) tracking system built spe
 - Real-time summary statistics cards (Total DCs, Active Production, Inline Lines, Completed Orders).
 - Quick modal creation and editing for Delivery Challans with input validation.
 
+### 7. Automated Expected Output Scheduling Formula & Full-Width Layout
+- **Formula-Driven Auto-Fill**:
+  - Automatically calculates production days needed: `Days = ceil(Balance / Daily Target)`.
+  - When the manager enters a daily quota (e.g., `800`) on any date, downstream working days automatically populate with that rate.
+  - **Sundays Off**: Automatically skips all Sundays (marked `OFF` or disabled with `—`), never scheduling quotas on weekly rest days.
+  - **Final-Day Remainder**: The final calculated production day receives the exact remaining balance (e.g. `350` or `566`) so the scheduled quota matches the lot total.
+  - Automatic continuation across month boundaries if the required days exceed the current calendar month.
+  - Integrated notification banner with 1-click **"Undo Auto-Fill"** and an **"Auto-Schedule Quota"** toolbar button with quick rate presets (`500`, `650`, `800`, `1000`, `1200`).
+- **Edge-to-Edge Full-Page Fluid Layout**:
+  - Removed restrictive container box constraints (`max-w-7xl`) on the ledger view, allowing the table to expand full-width across wide monitors.
+  - Enlarged cell dimensions and typography (`text-sm font-bold` for numeric values, larger stepper inputs) for easy shop-floor readability.
+
+### 8. Bug Fixes: Day 1 Input Addition & Initial Days Gap Calculation
+- **Fixed Day 1 Input Replacement Bug**:
+  - Previously, entering an input on Day 1 (e.g. `500` with lot quantity `9,000`) overwrote the opening quantity with `500`, setting balance to `500` instead of `9,500`.
+  - Fixed so Day 1 balance is always `Opening QTY + Day 1 Input` (e.g. `9,000 + 500 = 9,500`), preserving the full delivery challan order quantity.
+- **Fixed Initial Days Gap Calculation**:
+  - Previously, the Days Gap was never computed for the first actual output entry because the reference date was only initialized after the first output had occurred.
+  - Fixed so the reference date begins at the order start date (`challan.orderDate`). If production is delayed by 3–4 days in the first week, the gap (e.g. `3d`) is now immediately and accurately calculated on the first actual output entry.
+
 ---
 
 ## 🛠️ Tech Stack & Key Files
