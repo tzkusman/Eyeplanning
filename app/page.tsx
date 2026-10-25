@@ -26,6 +26,7 @@ import {
   getSavedMonth,
   saveActiveMonth,
   parseOrderDate,
+  DEFAULT_USERS,
 } from '@/lib/storage';
 import { initRealtimeSubscription } from '@/lib/realtime';
 import { UserRole } from '@/types';
@@ -50,8 +51,7 @@ export default function HomePage() {
   const [month, setMonth] = useState<number>(() => getSavedMonth());
 
   const [planningRows, setPlanningRows] = useState<PlanningRow[]>([]);
-  const [currentUser, setCurrentUserState] = useState<UserProfile | null>(null);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [currentUser, setCurrentUserState] = useState<UserProfile | null>(() => getCurrentUser() || DEFAULT_USERS[0]);
   const [users, setUsers] = useState<UserProfile[]>(() => getLocalUsers());
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isNewDCModalOpen, setIsNewDCModalOpen] = useState(false);
@@ -161,30 +161,13 @@ export default function HomePage() {
     let isMounted = true;
 
     async function initSessionAndData() {
-      // 1. Immediately read cached user from localStorage (0ms delay)
-      const cachedUser = getCurrentUser();
-      if (cachedUser) {
-        setCurrentUserState(cachedUser);
-        setIsCheckingAuth(false);
-      } else {
-        setIsCheckingAuth(false);
+      // 1. Ensure current user is loaded
+      const user = getCurrentUser() || DEFAULT_USERS[0];
+      if (user && isMounted) {
+        setCurrentUserState(user);
       }
 
       try {
-        // 2. Verify session in background
-        const verifiedUser = await verifyCurrentUserSession();
-        if (!isMounted) return;
-
-        if (!verifiedUser && cachedUser) {
-          // Session was revoked on server
-          setCurrentUserState(null);
-          return;
-        }
-
-        if (verifiedUser) {
-          setCurrentUserState(verifiedUser);
-        }
-
         // Fetch real challans (via server API -> Supabase)
         const list = await getChallans();
         if (!isMounted) return;
@@ -213,7 +196,6 @@ export default function HomePage() {
         }
       } catch (err) {
         console.error('Initialization error:', err);
-        if (isMounted) setIsCheckingAuth(false);
       }
     }
 
@@ -418,26 +400,7 @@ export default function HomePage() {
   // Active Challan
   const activeChallan = challans.find((c) => c.id === activeDCId) || challans[0];
 
-  // 1. Initial authentication check screen
-  if (isCheckingAuth) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white p-4">
-        <div className="flex items-center gap-2.5 mb-4">
-          <EyeLogo size={36} className="text-sky-400 animate-pulse" />
-          <span className="font-black text-xl tracking-wider text-white">EYE PLANNING</span>
-          <span className="bg-sky-500 text-slate-950 px-2 py-0.5 rounded text-[11px] font-black">
-            DENIM CRAFTS
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-          <span>Verifying authorized credentials...</span>
-        </div>
-      </div>
-    );
-  }
-
-  // 2. Gateway: First show login page if not authenticated; enter only if credentials valid!
+  // Gateway: If explicitly logged out, show login page; otherwise render ERP app
   if (!currentUser) {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }

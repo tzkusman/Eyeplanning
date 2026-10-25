@@ -12,6 +12,64 @@ const STORAGE_KEYS = {
   ACTIVE_MONTH: 'eye_erp_active_month',
 };
 
+// Safe in-memory fallback store for sandboxed or cross-origin iframe environments
+const memoryFallbackStore = new Map<string, string>();
+
+export const safeStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch {
+      // Storage restricted / sandboxed iframe
+    }
+    return memoryFallbackStore.get(key) || null;
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch {
+      // Storage restricted / sandboxed iframe
+    }
+    memoryFallbackStore.set(key, value);
+  },
+  removeItem: (key: string): void => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Storage restricted
+    }
+    memoryFallbackStore.delete(key);
+  },
+  clearPrefix: (prefix: string): void => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith(prefix)) {
+            toRemove.push(k);
+          }
+        }
+        toRemove.forEach((k) => window.localStorage.removeItem(k));
+      }
+    } catch {
+      // Storage restricted
+    }
+    for (const k of Array.from(memoryFallbackStore.keys())) {
+      if (k.startsWith(prefix)) {
+        memoryFallbackStore.delete(k);
+      }
+    }
+  },
+};
+
+
 export const MONTH_NAMES = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
@@ -708,33 +766,29 @@ export async function getChallans(): Promise<Challan[]> {
         ...c,
         status: normalizeStitchingStatus(c.status),
       }));
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(list));
-      }
+      safeStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(list));
       return list;
     }
   } catch (err) {
     console.warn('Could not fetch challans from server API:', err);
   }
 
-  // Fallback to localStorage
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem(STORAGE_KEYS.CHALLANS);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((c: Challan) => ({
-            ...c,
-            status: normalizeStitchingStatus(c.status),
-          }));
-        }
-      } catch {
-        // ignore
+  // Fallback to safeStorage
+  const raw = safeStorage.getItem(STORAGE_KEYS.CHALLANS);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map((c: Challan) => ({
+          ...c,
+          status: normalizeStitchingStatus(c.status),
+        }));
       }
+    } catch {
+      // ignore
     }
-    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(DEFAULT_CHALLANS));
   }
+  safeStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(DEFAULT_CHALLANS));
   return DEFAULT_CHALLANS;
 }
 
@@ -827,26 +881,24 @@ export function getLocalChallanBalance(challan: Challan): {
     };
   }
 
-  // Fallback to checking cached local storage rows
-  if (typeof window !== 'undefined') {
-    const parsed = parseOrderDate(challan.orderDate);
-    const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_${parsed.year}_${parsed.month}`;
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      try {
-        const rows: PlanningRow[] = JSON.parse(raw);
-        if (Array.isArray(rows) && rows.length > 0) {
-          const rec = recalculatePlanningRows(rows, challan.openingQty);
-          return {
-            totalInput: rec.totals.targetInput,
-            totalActual: rec.totals.totalActualOutput,
-            remainingBalance: rec.totals.currentBalance,
-            completionRate: rec.totals.completionRate,
-          };
-        }
-      } catch {
-        // ignore
+  // Fallback to checking cached safe storage rows
+  const parsed = parseOrderDate(challan.orderDate);
+  const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_${parsed.year}_${parsed.month}`;
+  const raw = safeStorage.getItem(key);
+  if (raw) {
+    try {
+      const rows: PlanningRow[] = JSON.parse(raw);
+      if (Array.isArray(rows) && rows.length > 0) {
+        const rec = recalculatePlanningRows(rows, challan.openingQty);
+        return {
+          totalInput: rec.totals.targetInput,
+          totalActual: rec.totals.totalActualOutput,
+          remainingBalance: rec.totals.currentBalance,
+          completionRate: rec.totals.completionRate,
+        };
       }
+    } catch {
+      // ignore
     }
   }
 
@@ -886,10 +938,8 @@ export async function createChallan(
     createdChallan,
     ...current.filter((c) => c.id !== createdChallan.id && c.dcNo !== createdChallan.dcNo),
   ];
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(updated));
-    broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: createdChallan.id }).catch(() => {});
-  }
+  safeStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(updated));
+  broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: createdChallan.id }).catch(() => {});
 
   // Generate and AWAIT initial auto-scheduled expected quota rows!
   if (
@@ -900,12 +950,10 @@ export async function createChallan(
     try {
       const initialRows = generateAutoScheduledRows(createdChallan);
       const parsed = parseOrderDate(createdChallan.orderDate);
-      if (typeof window !== 'undefined') {
-        const key = `${STORAGE_KEYS.PLANNING_PREFIX}${createdChallan.id}_${parsed.year}_${parsed.month}`;
-        localStorage.setItem(key, JSON.stringify(initialRows));
-        const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${createdChallan.id}`;
-        localStorage.setItem(extKey, JSON.stringify(initialRows.map((r) => r.dateStr)));
-      }
+      const key = `${STORAGE_KEYS.PLANNING_PREFIX}${createdChallan.id}_${parsed.year}_${parsed.month}`;
+      safeStorage.setItem(key, JSON.stringify(initialRows));
+      const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${createdChallan.id}`;
+      safeStorage.setItem(extKey, JSON.stringify(initialRows.map((r) => r.dateStr)));
       await savePlanningSchedule(createdChallan.id, parsed.year, parsed.month, initialRows);
     } catch (e) {
       console.warn('Initial auto schedule save note (cached locally):', e);
@@ -929,10 +977,8 @@ export async function updateChallan(challan: Challan): Promise<void> {
   // Update local cache
   const current = await getChallans();
   const next = current.map((c) => (c.id === challan.id ? challan : c));
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(next));
-    broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: challan.id }).catch(() => {});
-  }
+  safeStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(next));
+  broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: challan.id }).catch(() => {});
 }
 
 export async function deleteChallan(challanId: string): Promise<void> {
@@ -945,10 +991,8 @@ export async function deleteChallan(challanId: string): Promise<void> {
   // Update local cache
   const current = await getChallans();
   const next = current.filter((c) => c.id !== challanId);
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(next));
-    broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId }).catch(() => {});
-  }
+  safeStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(next));
+  broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId }).catch(() => {});
 }
 
 // 2. DAILY PLANNING REGISTER ROWS
@@ -1016,20 +1060,18 @@ export async function getPlanningSchedule(
       });
 
       // Also check if user has extended dates saved locally
-      if (typeof window !== 'undefined') {
-        const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challan.id}`;
-        const rawExt = localStorage.getItem(extKey);
-        if (rawExt) {
-          try {
-            const extDates: string[] = JSON.parse(rawExt);
-            extDates.forEach((dStr) => {
-              if (!mergedRows.some((r) => r.dateStr === dStr)) {
-                mergedRows.push(buildRowForDate(challan, dStr, false));
-              }
-            });
-          } catch {
-            // ignore
-          }
+      const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challan.id}`;
+      const rawExt = safeStorage.getItem(extKey);
+      if (rawExt) {
+        try {
+          const extDates: string[] = JSON.parse(rawExt);
+          extDates.forEach((dStr) => {
+            if (!mergedRows.some((r) => r.dateStr === dStr)) {
+              mergedRows.push(buildRowForDate(challan, dStr, false));
+            }
+          });
+        } catch {
+          // ignore
         }
       }
 
@@ -1080,9 +1122,8 @@ export async function getPlanningSchedule(
   }
 
   // Fallback to local storage
-  if (typeof window !== 'undefined') {
-    const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_${year}_${month}`;
-    const raw = localStorage.getItem(key);
+  const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_${year}_${month}`;
+  const raw = safeStorage.getItem(key);
     if (raw) {
       try {
         const parsedRows: PlanningRow[] = JSON.parse(raw);
@@ -1124,7 +1165,6 @@ export async function getPlanningSchedule(
         // ignore
       }
     }
-  }
 
   if (challan.firstExpectedDate && challan.dailyExpectedRate && challan.dailyExpectedRate > 0) {
     return fillDateGapsInRows(challan, generateAutoScheduledRows(challan));
@@ -1151,15 +1191,13 @@ export async function savePlanningSchedule(
   );
 
   // 1. Save local
-  if (typeof window !== 'undefined') {
-    const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challanId}_${year}_${month}`;
-    localStorage.setItem(key, JSON.stringify(cleanRows));
+  const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challanId}_${year}_${month}`;
+  safeStorage.setItem(key, JSON.stringify(cleanRows));
 
-    // Save all dates present in the rows to extended dates registry
-    const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challanId}`;
-    const allDates = cleanRows.map((r) => r.dateStr);
-    localStorage.setItem(extKey, JSON.stringify(allDates));
-  }
+  // Save all dates present in the rows to extended dates registry
+  const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challanId}`;
+  const allDates = cleanRows.map((r) => r.dateStr);
+  safeStorage.setItem(extKey, JSON.stringify(allDates));
 
   // 2. Save server via API route (writes directly to Supabase entries table)
   try {
@@ -1179,9 +1217,7 @@ export async function savePlanningSchedule(
       throw new Error(json.error || 'Failed to save to Supabase');
     }
     // Broadcast live update across all active managers, admins, and users immediately
-    if (typeof window !== 'undefined') {
-      broadcastLiveChange({ type: 'PLAN_UPDATE', challanId }).catch(() => {});
-    }
+    broadcastLiveChange({ type: 'PLAN_UPDATE', challanId }).catch(() => {});
     return json;
   } catch (err) {
     console.error('Error saving planning rows to server API:', err);
@@ -1205,20 +1241,11 @@ export async function resetChallanPlanningEntries(
     console.error('Error deleting planning entries from API:', err);
   }
 
-  if (typeof window !== 'undefined') {
-    const prefix = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_`;
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(prefix)) {
-        keysToRemove.push(k);
-      }
-    }
-    keysToRemove.forEach((k) => localStorage.removeItem(k));
-    const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challan.id}`;
-    localStorage.removeItem(extKey);
-    broadcastLiveChange({ type: 'PLAN_UPDATE', challanId: challan.id }).catch(() => {});
-  }
+  const prefix = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_`;
+  safeStorage.clearPrefix(prefix);
+  const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challan.id}`;
+  safeStorage.removeItem(extKey);
+  broadcastLiveChange({ type: 'PLAN_UPDATE', challanId: challan.id }).catch(() => {});
 
   return generateMonthDays(challan, year, month);
 }
@@ -1233,9 +1260,7 @@ export async function getRemoteUsers(): Promise<UserProfile[]> {
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.users)) {
-        if (typeof window !== 'undefined') {
-          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
-        }
+        safeStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
         return data.users;
       }
     }
@@ -1264,9 +1289,7 @@ export async function createRemoteUser(payload: {
 
   // Update local cache
   saveLocalUser(data.user);
-  if (typeof window !== 'undefined') {
-    broadcastLiveChange({ type: 'USER_UPDATE', userId: data.user.id }).catch(() => {});
-  }
+  broadcastLiveChange({ type: 'USER_UPDATE', userId: data.user.id }).catch(() => {});
   return data.user;
 }
 
@@ -1280,9 +1303,7 @@ export async function updateRemoteUserStatus(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, isActive }),
     });
-    if (typeof window !== 'undefined') {
-      broadcastLiveChange({ type: 'USER_UPDATE', userId }).catch(() => {});
-    }
+    broadcastLiveChange({ type: 'USER_UPDATE', userId }).catch(() => {});
   } catch (err) {
     console.error('Error updating user status on server:', err);
   }
@@ -1298,18 +1319,16 @@ export async function deleteRemoteUser(userId: string): Promise<void> {
   }
 
   // Update local cache
-  if (typeof window !== 'undefined') {
-    const users = getLocalUsers();
-    const next = users.filter((u) => u.id !== userId);
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+  const users = getLocalUsers();
+  const next = users.filter((u) => u.id !== userId);
+  safeStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
 
-    // If deleting currently logged in user, clear session
-    const cur = getCurrentUser();
-    if (cur && cur.id === userId) {
-      setCurrentUser(null);
-    }
-    broadcastLiveChange({ type: 'USER_UPDATE', userId }).catch(() => {});
+  // If deleting currently logged in user, clear session
+  const cur = getCurrentUser();
+  if (cur && cur.id === userId) {
+    setCurrentUser(null);
   }
+  broadcastLiveChange({ type: 'USER_UPDATE', userId }).catch(() => {});
 }
 
 export async function resetRemoteUserPassword(
@@ -1404,20 +1423,18 @@ export async function verifyCurrentUserSession(): Promise<UserProfile | null> {
 }
 
 export function getLocalUsers(): UserProfile[] {
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem(STORAGE_KEYS.USERS);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      } catch {
-        // ignore
+  const raw = safeStorage.getItem(STORAGE_KEYS.USERS);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
       }
+    } catch {
+      // ignore
     }
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(DEFAULT_USERS));
   }
+  safeStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(DEFAULT_USERS));
   return DEFAULT_USERS;
 }
 
@@ -1427,83 +1444,64 @@ export function saveLocalUser(user: UserProfile): void {
     user,
     ...users.filter((u) => u.id !== user.id && u.email.toLowerCase() !== user.email.toLowerCase()),
   ];
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
-  }
+  safeStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
 }
 
 export function getCurrentUser(): UserProfile | null {
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.email) {
-          return parsed;
-        }
-      } catch {
-        // ignore
+  const raw = safeStorage.getItem(STORAGE_KEYS.CURRENT_USER);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.email) {
+        return parsed;
       }
+    } catch {
+      // ignore
     }
-    return null;
   }
   return null;
 }
 
 export function setCurrentUser(user: UserProfile | null): void {
-  if (typeof window !== 'undefined') {
-    if (user) {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    }
+  if (user) {
+    safeStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+  } else {
+    safeStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
   }
 }
 
 // 4. ACTIVE CONTEXT HELPERS
 export function getActiveDCId(): string {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_DC_ID) || 'dc-3696';
-  }
-  return 'dc-3696';
+  return safeStorage.getItem(STORAGE_KEYS.ACTIVE_DC_ID) || 'dc-3696';
 }
 
 export function setActiveDCId(id: string): void {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_DC_ID, id);
-  }
+  safeStorage.setItem(STORAGE_KEYS.ACTIVE_DC_ID, id);
 }
 
 export function getSavedYear(): number {
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem(STORAGE_KEYS.ACTIVE_YEAR);
-    if (raw) {
-      const parsed = parseInt(raw, 10);
-      if (!isNaN(parsed)) return parsed;
-    }
+  const raw = safeStorage.getItem(STORAGE_KEYS.ACTIVE_YEAR);
+  if (raw) {
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed)) return parsed;
   }
   return getCurrentCalendarYear();
 }
 
 export function saveActiveYear(year: number): void {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_YEAR, String(year));
-  }
+  safeStorage.setItem(STORAGE_KEYS.ACTIVE_YEAR, String(year));
 }
 
 export function getSavedMonth(): number {
-  if (typeof window !== 'undefined') {
-    const raw = localStorage.getItem(STORAGE_KEYS.ACTIVE_MONTH);
-    if (raw) {
-      const parsed = parseInt(raw, 10);
-      if (!isNaN(parsed) && parsed >= 1 && parsed <= 12) return parsed;
-    }
+  const raw = safeStorage.getItem(STORAGE_KEYS.ACTIVE_MONTH);
+  if (raw) {
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed) && parsed >= 1 && parsed <= 12) return parsed;
   }
   return getCurrentCalendarMonth();
 }
 
 export function saveActiveMonth(month: number): void {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_MONTH, String(month));
-  }
+  safeStorage.setItem(STORAGE_KEYS.ACTIVE_MONTH, String(month));
 }
+
