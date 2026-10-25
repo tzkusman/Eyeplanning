@@ -8,9 +8,7 @@ import {
   Search,
   CheckCircle2,
   Clock,
-  ShieldCheck,
   Building2,
-  Tag,
   ArrowRight,
   Trash2,
   Edit3,
@@ -18,8 +16,12 @@ import {
   Activity,
   Calendar,
   FileSpreadsheet,
+  Shirt,
+  X,
+  ChevronDown,
+  RotateCcw,
 } from 'lucide-react';
-import { parseOrderDate } from '@/lib/storage';
+import { parseOrderDate, getLocalChallanBalance } from '@/lib/storage';
 import { exportChallansToExcel } from '@/lib/exportUtils';
 
 interface DCHubProps {
@@ -44,20 +46,100 @@ export function DCHub({
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | StitchingStatus>('ALL');
   const [dcToDelete, setDcToDelete] = useState<Challan | null>(null);
+  const [visibleCount, setVisibleCount] = useState(10);
 
+  // 1. Filter challans using smart multi-format search (supports 'd', 'dc', '#', 'dc 7596', '#7596', or digits)
   const filteredChallans = useMemo(() => {
     return challans.filter((c) => {
       if (statusFilter !== 'ALL' && c.status !== statusFilter) return false;
       if (searchTerm.trim() !== '') {
-        const query = searchTerm.toLowerCase();
-        const matchesDC = c.dcNo.toLowerCase().includes(query);
-        const matchesParty = c.party.toLowerCase().includes(query);
-        const matchesArticle = (c.article || '').toLowerCase().includes(query);
-        if (!matchesDC && !matchesParty && !matchesArticle) return false;
+        const rawQuery = searchTerm.trim().toLowerCase();
+        
+        // Strip common prefixes like 'delivery challan', 'challan', 'dc number', 'dc no', 'dc', '#', etc.
+        const queryWithoutDC = rawQuery
+          .replace(/^(delivery\s*challan|delivery|challan|dc\s*number|dc\s*no\.?|dc\s*#?|#)\s*/i, '')
+          .trim();
+        const queryDigits = rawQuery.replace(/\D/g, '');
+
+        const rawDcNo = String(c.dcNo || '').trim();
+        const dcNo = rawDcNo.toLowerCase();
+        const dcNoDigits = dcNo.replace(/\D/g, '');
+
+        // If query is just 'd', 'dc', 'dc#', 'dc no', 'challan', etc., match all Delivery Challans
+        const isGenericDCPrefix =
+          rawQuery === 'd' ||
+          rawQuery === 'dc' ||
+          rawQuery === 'dc.' ||
+          rawQuery === 'dc:' ||
+          rawQuery === 'dc#' ||
+          rawQuery === 'dc #' ||
+          rawQuery === '#' ||
+          rawQuery === 'dc-' ||
+          rawQuery === 'dc no' ||
+          rawQuery === 'dc no.' ||
+          rawQuery === 'dc number' ||
+          rawQuery === 'challan' ||
+          rawQuery === 'delivery' ||
+          rawQuery === 'delivery challan';
+
+        const matchesDC =
+          isGenericDCPrefix ||
+          dcNo.includes(rawQuery) ||
+          `dc #${dcNo}`.includes(rawQuery) ||
+          `dc ${dcNo}`.includes(rawQuery) ||
+          `dc#${dcNo}`.includes(rawQuery) ||
+          `#${dcNo}`.includes(rawQuery) ||
+          (queryWithoutDC.length > 0 && dcNo.includes(queryWithoutDC)) ||
+          (queryDigits.length > 0 && dcNoDigits.length > 0 && dcNoDigits.includes(queryDigits));
+
+        const matchesParty =
+          (c.party || '').toLowerCase().includes(rawQuery) ||
+          (queryWithoutDC.length > 0 && (c.party || '').toLowerCase().includes(queryWithoutDC));
+        const matchesArticle =
+          (c.article || '').toLowerCase().includes(rawQuery) ||
+          (queryWithoutDC.length > 0 && (c.article || '').toLowerCase().includes(queryWithoutDC));
+        const matchesItem =
+          (c.item || '').toLowerCase().includes(rawQuery) ||
+          (queryWithoutDC.length > 0 && (c.item || '').toLowerCase().includes(queryWithoutDC));
+        const matchesNotes = (c.notes || '').toLowerCase().includes(rawQuery);
+
+        if (!matchesDC && !matchesParty && !matchesArticle && !matchesItem && !matchesNotes) {
+          return false;
+        }
       }
       return true;
     });
   }, [challans, searchTerm, statusFilter]);
+
+  // 2. Sort chronologically descending (latest orders and latest created at the top)
+  const sortedFilteredChallans = useMemo(() => {
+    return [...filteredChallans].sort((a, b) => {
+      const dateA = parseOrderDate(a.orderDate).formatted;
+      const dateB = parseOrderDate(b.orderDate).formatted;
+      if (dateB !== dateA) return dateB.localeCompare(dateA);
+
+      if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) {
+        return b.createdAt.localeCompare(a.createdAt);
+      }
+
+      const numA = parseInt(String(a.dcNo).replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt(String(b.dcNo).replace(/\D/g, ''), 10) || 0;
+      return numB - numA;
+    });
+  }, [filteredChallans]);
+
+  // 3. Batch display: If actively searching or filtering, show all matching results immediately;
+  // otherwise, default to top 10 latest with "Load 10 More"
+  const isFilteringOrSearching = searchTerm.trim() !== '' || statusFilter !== 'ALL';
+  const displayedChallans = useMemo(() => {
+    if (isFilteringOrSearching) {
+      return sortedFilteredChallans;
+    }
+    return sortedFilteredChallans.slice(0, visibleCount);
+  }, [sortedFilteredChallans, isFilteringOrSearching, visibleCount]);
+
+  const hasMore = sortedFilteredChallans.length > visibleCount;
+  const remainingCount = Math.max(0, sortedFilteredChallans.length - visibleCount);
 
   const stats = useMemo(() => {
     const total = challans.length;
@@ -65,7 +147,11 @@ export function DCHub({
     const inlineCount = challans.filter((c) => c.status === 'Inline').length;
     const completeCount = challans.filter((c) => c.status === 'Complete').length;
     const totalQty = challans.reduce((sum, c) => sum + (c.openingQty || 0), 0);
-    return { total, processCount, inlineCount, completeCount, totalQty };
+    const totalRemaining = challans.reduce((sum, c) => {
+      const bal = getLocalChallanBalance(c);
+      return sum + bal.remainingBalance;
+    }, 0);
+    return { total, processCount, inlineCount, completeCount, totalQty, totalRemaining };
   }, [challans]);
 
   const getStatusBadgeStyle = (status: StitchingStatus) => {
@@ -82,53 +168,56 @@ export function DCHub({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 w-full">
       {/* Overview Stat Ribbon */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-semibold uppercase">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider">
             <span>Total Challans</span>
             <Layers className="w-4 h-4 text-slate-400" />
           </div>
-          <p className="mt-2 text-2xl font-black font-mono tabular-nums text-slate-900">
+          <p className="mt-2 text-3xl font-black font-mono tabular-nums text-slate-900">
             {stats.total}
           </p>
-          <span className="text-[11px] text-slate-500">
+          <span className="text-xs text-slate-500 font-medium mt-1 block">
             Total {stats.totalQty.toLocaleString()} pcs registered
           </span>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-semibold uppercase">
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider">
             <span>In Process</span>
             <Clock className="w-4 h-4 text-sky-500" />
           </div>
-          <p className="mt-2 text-2xl font-black font-mono tabular-nums text-sky-700">
+          <p className="mt-2 text-3xl font-black font-mono tabular-nums text-sky-700">
             {stats.processCount}
           </p>
-          <span className="text-[11px] text-sky-600 font-medium">Active on sewing floor</span>
+          <span className="text-xs text-sky-600 font-semibold mt-1 block">Active on sewing floor</span>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-semibold uppercase">
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider">
             <span>Inline QC</span>
             <Activity className="w-4 h-4 text-indigo-500" />
           </div>
-          <p className="mt-2 text-2xl font-black font-mono tabular-nums text-indigo-700">
+          <p className="mt-2 text-3xl font-black font-mono tabular-nums text-indigo-700">
             {stats.inlineCount}
           </p>
-          <span className="text-[11px] text-indigo-600 font-medium">Under quality audit</span>
+          <span className="text-xs text-indigo-600 font-semibold mt-1 block">Under quality audit</span>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-semibold uppercase">
-            <span>Complete</span>
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+          <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider">
+            <span>Remaining Balance</span>
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
           </div>
-          <p className="mt-2 text-2xl font-black font-mono tabular-nums text-emerald-700">
-            {stats.completeCount}
+          <p className="mt-2 text-3xl font-black font-mono tabular-nums text-slate-900">
+            {stats.totalRemaining.toLocaleString()}{' '}
+            <span className="text-sm font-sans text-slate-500 font-bold">pcs</span>
           </p>
-          <span className="text-[11px] text-emerald-600 font-medium">Production completed</span>
+          <span className="text-xs text-emerald-600 font-semibold mt-1 block">
+            {stats.completeCount} lots fully completed
+          </span>
         </div>
       </div>
 
@@ -140,11 +229,21 @@ export function DCHub({
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search DC #, Line, Assembly, Article..."
+              placeholder="Search DC #, Line, Assembly, Article, Item..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500 w-56 sm:w-72"
+              className="pl-9 pr-8 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500 w-56 sm:w-80"
             />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           {/* Stitching Status Filter Tabs */}
@@ -213,59 +312,106 @@ export function DCHub({
         </div>
       </div>
 
-      {/* Challans Table with Stitching Status Dropdown */}
-      <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase text-[11px] tracking-wider">
+      {/* Challans Table with Dedicated Item & Remaining Balance Columns */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden w-full">
+        <div className="overflow-x-auto w-full">
+          <table className="w-full text-left text-xs border-collapse table-auto">
+            <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold uppercase text-xs tracking-wider">
               <tr>
-                <th className="py-3 px-4">DC Number</th>
-                <th className="py-3 px-4">Line or Assembly</th>
-                <th className="py-3 px-4">Article / Style</th>
-                <th className="py-3 px-4 text-right">Opening Qty</th>
-                <th className="py-3 px-4">Order Date</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th className="py-3.5 px-4 sm:px-5 w-[11%]">DC Number</th>
+                <th className="py-3.5 px-4 sm:px-5 w-[16%]">Line or Assembly</th>
+                <th className="py-3.5 px-4 sm:px-5 w-[13%]">Article / Style</th>
+                <th className="py-3.5 px-4 w-[10%]">Item</th>
+                <th className="py-3.5 px-4 sm:px-5 text-right w-[11%]">Opening Qty</th>
+                <th className="py-3.5 px-4 sm:px-5 text-right w-[16%]">Remaining Balance</th>
+                <th className="py-3.5 px-4 sm:px-5 w-[10%]">Order Date</th>
+                <th className="py-3.5 px-4 sm:px-5 w-[8%]">Status</th>
+                <th className="py-3.5 px-4 sm:px-5 text-right w-[5%]">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredChallans.map((challan) => {
+              {displayedChallans.map((challan) => {
                 const parsedDate = parseOrderDate(challan.orderDate);
+                const balInfo = getLocalChallanBalance(challan);
+                const isFinished = balInfo.remainingBalance === 0 || challan.status === 'Complete';
+
                 return (
                   <tr key={challan.id} className="hover:bg-slate-50/80 transition-colors">
                     {/* DC # */}
-                    <td className="py-3.5 px-4 font-mono font-bold text-slate-900 text-sm">
+                    <td className="py-4 px-4 sm:px-5 font-mono font-black text-slate-900 text-sm whitespace-nowrap">
                       DC #{challan.dcNo}
                     </td>
 
-                    {/* Party */}
-                    <td className="py-3.5 px-4 font-medium text-slate-800">
+                    {/* Line or Assembly */}
+                    <td className="py-4 px-4 sm:px-5 font-semibold text-slate-800 text-sm">
                       <div className="flex items-center gap-1.5">
-                        <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
                         <span>{challan.party}</span>
                       </div>
                     </td>
 
-                    {/* Article */}
-                    <td className="py-3.5 px-4 text-slate-600">
+                    {/* Article / Style */}
+                    <td className="py-4 px-4 sm:px-5 text-slate-700 text-sm font-medium">
                       {challan.article}
                     </td>
 
+                    {/* Dedicated Item Column */}
+                    <td className="py-4 px-4">
+                      {challan.item ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 text-slate-800 font-bold border border-slate-200 text-xs whitespace-nowrap">
+                          <Shirt className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                          <span>{challan.item}</span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-mono text-xs">—</span>
+                      )}
+                    </td>
+
                     {/* Opening Qty */}
-                    <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-900 tabular-nums">
+                    <td className="py-4 px-4 sm:px-5 text-right font-mono font-bold text-slate-900 text-sm tabular-nums whitespace-nowrap">
                       {challan.openingQty.toLocaleString()} pcs
                     </td>
 
+                    {/* Dedicated Remaining Balance Column with Completion Progress */}
+                    <td className="py-4 px-4 sm:px-5 text-right whitespace-nowrap">
+                      {isFinished ? (
+                        <div className="inline-flex flex-col items-end">
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Complete (0 left)</span>
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono mt-0.5">100% finished</span>
+                        </div>
+                      ) : (
+                        <div className="inline-flex flex-col items-end">
+                          <div className="flex items-center gap-1 font-mono font-bold text-slate-900 tabular-nums text-sm">
+                            <span>{balInfo.remainingBalance.toLocaleString()} pcs</span>
+                            <span className="text-[11px] text-amber-600 font-sans font-bold">left</span>
+                          </div>
+                          {/* Micro Progress Bar */}
+                          <div className="w-32 bg-slate-100 rounded-full h-2 mt-1.5 overflow-hidden border border-slate-200 flex">
+                            <div
+                              className="bg-sky-500 h-full rounded-full transition-all"
+                              style={{ width: `${balInfo.completionRate}%` }}
+                            />
+                          </div>
+                          <span className="text-[10.5px] text-slate-600 font-mono mt-0.5">
+                            {balInfo.totalActual.toLocaleString()} / {balInfo.totalInput.toLocaleString()} pcs ({balInfo.completionRate}%)
+                          </span>
+                        </div>
+                      )}
+                    </td>
+
                     {/* Order Date */}
-                    <td className="py-3.5 px-4 font-mono text-slate-700 tabular-nums font-medium">
-                      <div className="flex items-center gap-1">
-                        <Calendar className="w-3 h-3 text-slate-400" />
+                    <td className="py-4 px-4 sm:px-5 font-mono text-slate-800 tabular-nums font-semibold text-xs whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-slate-400" />
                         <span>{parsedDate.display}</span>
                       </div>
                     </td>
 
                     {/* Status with Dropdown Menu */}
-                    <td className="py-3.5 px-4">
+                    <td className="py-4 px-4 sm:px-5 whitespace-nowrap">
                       <div className="inline-flex items-center">
                         <select
                           value={challan.status}
@@ -273,7 +419,7 @@ export function DCHub({
                             const newStatus = e.target.value as StitchingStatus;
                             onUpdateDCStatus?.(challan, newStatus);
                           }}
-                          className={`text-xs font-bold rounded-lg px-2.5 py-1 border transition-all cursor-pointer shadow-2xs focus:outline-none focus:ring-2 ${getStatusBadgeStyle(
+                          className={`text-xs font-bold rounded-lg px-3 py-1.5 border transition-all cursor-pointer shadow-2xs focus:outline-none focus:ring-2 ${getStatusBadgeStyle(
                             challan.status
                           )}`}
                           title="Click to change status in Supabase"
@@ -286,11 +432,11 @@ export function DCHub({
                     </td>
 
                     {/* Actions */}
-                    <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
+                    <td className="py-4 px-4 sm:px-5 text-right whitespace-nowrap">
+                      <div className="flex items-center justify-end gap-2">
                         <button
                           onClick={() => onSelectDC(challan.id)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition-colors cursor-pointer text-xs shadow-xs"
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition-colors cursor-pointer text-xs shadow-xs"
                         >
                           <span>Open Planning</span>
                           <ArrowRight className="w-3.5 h-3.5" />
@@ -317,15 +463,93 @@ export function DCHub({
                 );
               })}
 
-              {filteredChallans.length === 0 && (
+              {displayedChallans.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-500">
-                    No delivery challans match your search or filter.
+                  <td colSpan={9} className="py-10 text-center text-slate-500">
+                    <div className="flex flex-col items-center justify-center gap-1.5">
+                      <span className="font-semibold text-slate-700">No delivery challans match your search or filter</span>
+                      <span className="text-[11px] text-slate-400">
+                        Try searching by DC number (e.g. 7596, #7596), Line, Article, or Item (e.g. Jacket, Skirt)
+                      </span>
+                    </div>
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Table Footer / Pagination & Batch Loading Controls */}
+        <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+          {/* Left: Summary Counter */}
+          <div className="flex items-center gap-2 text-slate-600 font-medium">
+            <Layers className="w-4 h-4 text-slate-400 shrink-0" />
+            {isFilteringOrSearching ? (
+              <span>
+                Found <strong className="text-slate-900 font-bold">{sortedFilteredChallans.length}</strong> matching Delivery Challan{sortedFilteredChallans.length === 1 ? '' : 's'} across entire archive
+              </span>
+            ) : (
+              <span>
+                Showing <strong className="text-slate-900 font-bold">{displayedChallans.length}</strong> of{' '}
+                <strong className="text-slate-900 font-bold">{sortedFilteredChallans.length}</strong> latest Delivery Challans
+              </span>
+            )}
+          </div>
+
+          {/* Right: Actions */}
+          <div className="flex items-center gap-2">
+            {/* If searching or filtering, show Clear Search / Filter button */}
+            {isFilteringOrSearching && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchTerm('');
+                  setStatusFilter('ALL');
+                  setVisibleCount(10);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer shadow-2xs transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                <span>Reset Search</span>
+              </button>
+            )}
+
+            {/* If not searching and has more records to show */}
+            {!isFilteringOrSearching && hasMore && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((prev) => prev + 10)}
+                  className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold cursor-pointer shadow-xs transition-colors"
+                >
+                  <ChevronDown className="w-4 h-4" />
+                  <span>Load 10 More</span>
+                  <span className="bg-sky-700 text-sky-100 text-[10px] px-1.5 py-0.5 rounded-full font-mono">
+                    {remainingCount} remaining
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount(sortedFilteredChallans.length)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer shadow-2xs transition-colors"
+                >
+                  View All ({sortedFilteredChallans.length})
+                </button>
+              </>
+            )}
+
+            {/* Option to collapse back to top 10 if user expanded it */}
+            {!isFilteringOrSearching && visibleCount > 10 && sortedFilteredChallans.length > 10 && (
+              <button
+                type="button"
+                onClick={() => setVisibleCount(10)}
+                className="px-3 py-1.5 text-slate-500 hover:text-slate-800 underline font-medium cursor-pointer"
+              >
+                Show Top 10 Only
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

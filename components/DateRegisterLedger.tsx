@@ -10,6 +10,10 @@ import {
   extendRowsThroughDate,
   getNextDateString,
   formatDayLabel,
+  resetChallanPlanningEntries,
+  generateAutoScheduledRows,
+  getCalendarDayInfo,
+  fillDateGapsInRows,
 } from '@/lib/storage';
 import {
   Calendar,
@@ -37,6 +41,8 @@ import {
   FileSpreadsheet,
   FileText,
   Download,
+  Shirt,
+  RotateCcw,
 } from 'lucide-react';
 import { PrintRegisterModal } from './PrintRegisterModal';
 import { exportRegisterToExcel, exportRegisterToCSV } from '@/lib/exportUtils';
@@ -109,7 +115,8 @@ export function DateRegisterLedger({
   const [prevInitialRows, setPrevInitialRows] = useState(initialRows);
   if (initialRows !== prevInitialRows) {
     setPrevInitialRows(initialRows);
-    if (!hasUnsavedChanges) {
+    const isInputActive = typeof document !== 'undefined' && document.activeElement?.tagName === 'INPUT';
+    if (!hasUnsavedChanges && !isInputActive) {
       setRows(initialRows);
     }
   }
@@ -191,6 +198,36 @@ export function DateRegisterLedger({
     return formatDayLabel(nextDStr);
   }, [rows, parsedOrderDate]);
 
+  // Robust check for Opening Lot Day (Day 1 of the Delivery Challan)
+  const isOpeningRowCheck = useCallback(
+    (r: PlanningRow, idx: number): boolean => {
+      const rowClean = (r.dateStr || '').trim().split('T')[0];
+      const orderClean = (parsedOrderDate.formatted || '').trim().split('T')[0];
+      if (rowClean && orderClean && rowClean === orderClean) return true;
+      if (
+        Number(r.year) === Number(parsedOrderDate.year) &&
+        Number(r.month) === Number(parsedOrderDate.month)
+      ) {
+        if (Number(r.dayNumber) === Number(parsedOrderDate.day) || idx === 0) {
+          return true;
+        }
+      }
+      if (
+        r.qty !== null &&
+        r.qty !== undefined &&
+        Number(r.qty) > 0 &&
+        Number(r.qty) === Number(challan.openingQty)
+      ) {
+        return true;
+      }
+      if (idx === 0 && (!orderClean || rowClean <= orderClean)) {
+        return true;
+      }
+      return false;
+    },
+    [parsedOrderDate, challan.openingQty]
+  );
+
   // Pure Manufacturing Planning Balance & Expected vs Actual Difference Calculation
   // Supports continuous multi-month timeline (e.g. 20-Nov through 15-Dec)
   const { updatedRows, totals } = useMemo(() => {
@@ -209,9 +246,10 @@ export function DateRegisterLedger({
 
     for (let i = 0; i < sorted.length; i++) {
       const row = sorted[i];
+      const isOpeningLotDay = isOpeningRowCheck(row, i);
 
       // First active row of the order receives opening lot QTY plus any Day 1 extra input
-      if (i === 0) {
+      if (isOpeningLotDay && i === 0) {
         const day1ExtraInput =
           row.inputQty !== null && row.inputQty !== undefined && Number(row.inputQty) > 0
             ? Number(row.inputQty)
@@ -291,6 +329,8 @@ export function DateRegisterLedger({
 
       calculated.push({
         ...row,
+        expectedOutput: row.expectedOutput,
+        actualOutput: row.actualOutput,
         daysGap: row.daysGap && row.daysGap > 0 ? row.daysGap : calculatedGap,
         balance: curBal,
         isZeroBalance: isZero,
@@ -319,7 +359,7 @@ export function DateRegisterLedger({
         completionRate,
       },
     };
-  }, [rows, challan.openingQty, challan.orderDate]);
+  }, [rows, challan.openingQty, challan.orderDate, isOpeningRowCheck]);
 
   // Auto-schedule expected quota calculation helper
   // Divides available balance by daily target rate, skips Sundays, remainder on final day
@@ -338,9 +378,18 @@ export function DateRegisterLedger({
       let list = [...currentRows].sort(
         (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
       );
-      const targetIdx = list.findIndex((r) => r.id === startRowId);
+      let targetIdx = list.findIndex((r) => r.id === startRowId);
       if (targetIdx === -1 || targetRate <= 0 || startingBalance <= 0) {
         return { updatedRowsList: currentRows, scheduledDays: 0, remainder: 0, endDayLabel: '' };
+      }
+
+      // If requested starting row is Day 1 (the initial opening day), lock Day 1 and start from Day 2!
+      if (targetIdx === 0) {
+        list[0] = { ...list[0], expectedOutput: null };
+        targetIdx = 1;
+        if (list.length <= 1) {
+          list = addNextDayToRows(challan, list);
+        }
       }
 
       const daysNeeded = Math.ceil(startingBalance / targetRate);
@@ -358,8 +407,8 @@ export function DateRegisterLedger({
         }
 
         const row = list[currIdx];
-        const d = new Date(row.dateStr);
-        const isSunday = d.getDay() === 0;
+        const dayInfo = getCalendarDayInfo(row.dateStr);
+        const isSunday = dayInfo.isSunday;
 
         if (isSunday) {
           list[currIdx] = { ...row, expectedOutput: null };
@@ -416,13 +465,55 @@ export function DateRegisterLedger({
     saveCompletePlanToSupabase(cleared);
   };
 
+  const handleResetEntireLedger = async () => {
+    if (
+      !window.confirm(
+        `Reset Ledger for DC #${challan.dcNo}?\n\nThis will clear any auto-generated or glitch entries and restore a clean month register. Day 1 remains locked for opening stock arrival, and all daily outputs can be entered manually.`
+      )
+    ) {
+      return;
+    }
+
+    setIsSaving(true);
+    setSaveStatus('Resetting ledger entries...');
+    try {
+      const freshRows = await resetChallanPlanningEntries(challan, year, month);
+      setRows(freshRows);
+      setAutoScheduleNotification(null);
+      setHasUnsavedChanges(false);
+      setIsSaving(false);
+      setSaveStatus('Ledger cleanly reset!');
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err) {
+      console.error('Reset error:', err);
+      setIsSaving(false);
+      setSaveStatus('Failed to reset ledger');
+      setTimeout(() => setSaveStatus(null), 3000);
+    }
+  };
+
   // Handle cell value changes immediately in state, with debounced auto-save to Supabase
   const handleCellChange = (
     rowId: string,
     field: 'inputQty' | 'expectedOutput' | 'actualOutput' | 'buyerNotes' | 'status',
     value: string
   ) => {
-    const numVal = value.trim() === '' ? null : Number(value);
+    // Strict Lock Enforcement: Day 1 (Opening Lot), prep days, and Sundays are locked for output
+    if (field === 'expectedOutput' || field === 'actualOutput') {
+      const targetRow = rows.find((r) => r.id === rowId);
+      if (targetRow) {
+        const isOpening = isOpeningRowCheck(targetRow, rows.indexOf(targetRow));
+        const dayInfo = getCalendarDayInfo(targetRow.dateStr);
+        const expStart = challan.firstExpectedDate ? challan.firstExpectedDate.split('T')[0] : null;
+        const isPrep = Boolean(expStart && targetRow.dateStr < expStart);
+        if (isOpening || isPrep || dayInfo.isSunday) {
+          // Locked cells cannot be modified
+          return;
+        }
+      }
+    }
+
+    const numVal = value.trim() === '' ? null : isNaN(Number(value)) ? null : Math.max(0, Number(value));
     let nextRows = rows.map((r) => {
       if (r.id !== rowId) return r;
 
@@ -445,48 +536,6 @@ export function DateRegisterLedger({
       }
       return r;
     });
-
-    // Automatically trigger expected schedule if user types first daily expected rate
-    if (field === 'expectedOutput' && numVal !== null && numVal > 0) {
-      const sorted = [...nextRows].sort(
-        (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
-      );
-      const targetIdx = sorted.findIndex((r) => r.id === rowId);
-
-      // Only auto-fill if subsequent 1-3 working rows have no expected output
-      const downstreamHasValues = sorted
-        .slice(targetIdx + 1, targetIdx + 4)
-        .some(
-          (r) =>
-            r.expectedOutput !== null &&
-            r.expectedOutput !== undefined &&
-            Number(r.expectedOutput) > 0
-        );
-
-      if (!downstreamHasValues && targetIdx !== -1) {
-        // Balance available for this production period
-        let startingBal = challan.openingQty || 0;
-        if (targetIdx > 0 && updatedRows[targetIdx - 1]?.balance > 0) {
-          startingBal = updatedRows[targetIdx - 1].balance;
-        } else if (updatedRows[targetIdx]?.balance > 0) {
-          startingBal = updatedRows[targetIdx].balance;
-        }
-
-        if (startingBal > 0) {
-          const prevExpected = sorted.map((r) => ({ id: r.id, val: r.expectedOutput ?? null }));
-          const result = autoScheduleExpectedQuota(nextRows, rowId, numVal, startingBal);
-          nextRows = result.updatedRowsList;
-          setAutoScheduleNotification({
-            days: result.scheduledDays,
-            rate: numVal,
-            remainder: result.remainder,
-            endDateLabel: result.endDayLabel,
-            startRowId: rowId,
-            previousExpectedRows: prevExpected,
-          });
-        }
-      }
-    }
 
     setRows(nextRows);
     setHasUnsavedChanges(true);
@@ -771,6 +820,15 @@ export function DateRegisterLedger({
               <span>
                 Article: <strong className="text-slate-800">{challan.article}</strong>
               </span>
+              {challan.item && (
+                <>
+                  <span>•</span>
+                  <span className="inline-flex items-center gap-1 font-semibold text-slate-800 bg-sky-50 px-2 py-0.5 rounded border border-sky-200">
+                    <Shirt className="w-3 h-3 text-sky-600" />
+                    <span>Item: <strong>{challan.item}</strong></span>
+                  </span>
+                </>
+              )}
               <span>•</span>
               <span className="flex items-center gap-1.5 font-medium text-slate-700">
                 <Calendar className="w-3.5 h-3.5 text-sky-600" />
@@ -1141,12 +1199,40 @@ export function DateRegisterLedger({
             <div className="h-4 w-px bg-slate-300 mx-0.5 hidden sm:block" />
             <button
               type="button"
-              onClick={() => setIsAutoScheduleModalOpen(true)}
+              onClick={() => {
+                const autoRows = generateAutoScheduledRows(challan);
+                setRows(autoRows);
+                saveCompletePlanToSupabase(autoRows);
+                setSaveStatus('Auto-scheduled quota generated!');
+                setTimeout(() => setSaveStatus(null), 3000);
+              }}
               className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
-              title="Auto-calculate Expected Output schedule by daily target rate"
+              title="Automatically calculate and populate daily expected quotas for all days"
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-              <span>Auto-Schedule Quota</span>
+              <span>Auto-Fill Quotas</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm('Clear all expected output values for this DC?')) {
+                  handleClearSchedule();
+                }
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+              title="Clear expected output values for all days to enter manually"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-slate-500" />
+              <span>Clear Expected</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleResetEntireLedger}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+              title="Reset ledger to clean starting state and remove any glitch rows"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
+              <span>Reset Ledger</span>
             </button>
             <button
               type="button"
@@ -1252,9 +1338,10 @@ export function DateRegisterLedger({
             <tbody className="divide-y divide-slate-200">
               {updatedRows.map((row, index) => {
                 const isZeroRow = row.isZeroBalance;
-                const dateObj = new Date(row.dateStr);
-                const dayOfWeek = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-                const isSunday = dayOfWeek === 'Sun';
+                const dayInfo = getCalendarDayInfo(row.dateStr);
+                const dayOfWeek = dayInfo.dayOfWeek;
+                const isSunday = dayInfo.isSunday;
+                const isSaturday = dayInfo.isSaturday;
 
                 // Daily difference calculation between Actual and Expected
                 const hasActual =
@@ -1268,7 +1355,11 @@ export function DateRegisterLedger({
                 const hasValues = hasActual || hasExpected;
                 const dailyDiff = (row.actualOutput || 0) - (row.expectedOutput || 0);
 
-                const isFirstRowOfOrder = index === 0;
+                const isOpeningLotDay = isOpeningRowCheck(row, index);
+                const isFirstRowOfOrder = isOpeningLotDay;
+
+                const expectedStartDate = challan.firstExpectedDate ? challan.firstExpectedDate.split('T')[0] : null;
+                const isBeforeExpectedDate = Boolean(expectedStartDate && row.dateStr < expectedStartDate);
 
                 // Month boundary transition check (e.g. from 30-Nov to 1-Dec)
                 const prevRow = index > 0 ? updatedRows[index - 1] : null;
@@ -1335,7 +1426,11 @@ export function DateRegisterLedger({
                       {/* Day */}
                       <td
                         className={`py-3 px-2 text-center font-bold text-xs sm:text-sm ${
-                          isSunday ? 'text-rose-600 bg-rose-50/40' : 'text-slate-600'
+                          isSunday
+                            ? 'text-rose-600 bg-rose-50/40'
+                            : isSaturday
+                            ? 'text-indigo-900 bg-indigo-50/20 font-black'
+                            : 'text-slate-600'
                         }`}
                       >
                         {dayOfWeek}
@@ -1387,53 +1482,98 @@ export function DateRegisterLedger({
 
                       {/* EXPECTED OUTPUT */}
                       <td className="py-2.5 px-2 text-right">
-                        <input
-                          type="number"
-                          placeholder={isSunday ? 'OFF' : '—'}
-                          disabled={isSunday}
-                          value={
-                            row.expectedOutput !== null && row.expectedOutput !== undefined
-                              ? row.expectedOutput
-                              : ''
-                          }
-                          onChange={(e) =>
-                            handleCellChange(row.id, 'expectedOutput', e.target.value)
-                          }
-                          onBlur={handleCellBlur}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                          }}
-                          className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white transition-all ${
-                            isSunday
-                              ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed font-medium'
-                              : (row.expectedOutput || 0) > 0
-                              ? 'border-indigo-400 text-indigo-950 bg-indigo-50/50'
-                              : 'border-slate-300 text-slate-700'
-                          }`}
-                        />
+                        {isOpeningLotDay ? (
+                          <div
+                            title="Day 1 initial lot arrival is strictly locked"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border rounded font-mono font-bold bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed select-none"
+                          >
+                            🔒 Opening Lot
+                          </div>
+                        ) : isBeforeExpectedDate ? (
+                          <div
+                            title="Line prep lead time"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border border-dashed rounded font-mono font-bold bg-slate-50 text-slate-400 border-slate-300 cursor-not-allowed select-none"
+                          >
+                            🔒 Line Prep
+                          </div>
+                        ) : isSunday ? (
+                          <div
+                            title="Sunday is factory off-day"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border rounded font-mono font-bold bg-rose-50 text-rose-500 border-rose-200 cursor-not-allowed select-none"
+                          >
+                            OFF (Sun)
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            placeholder="—"
+                            value={
+                              row.expectedOutput !== null && row.expectedOutput !== undefined
+                               ? row.expectedOutput
+                                : ''
+                            }
+                            onChange={(e) =>
+                              handleCellChange(row.id, 'expectedOutput', e.target.value)
+                            }
+                            onBlur={handleCellBlur}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                            }}
+                            className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold transition-all ${
+                              (row.expectedOutput || 0) > 0
+                                ? 'border-indigo-400 text-indigo-950 bg-indigo-50/50 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white'
+                                : 'border-slate-300 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       {/* ACTUAL OUTPUT */}
                       <td className="py-2.5 px-2 text-right">
-                        <input
-                          type="number"
-                          placeholder="—"
-                          value={
-                            row.actualOutput !== null && row.actualOutput !== undefined
-                              ? row.actualOutput
-                              : ''
-                          }
-                          onChange={(e) => handleCellChange(row.id, 'actualOutput', e.target.value)}
-                          onBlur={handleCellBlur}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                          }}
-                          className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white transition-all ${
-                            (row.actualOutput || 0) > 0
-                              ? 'border-emerald-500 text-emerald-950 bg-emerald-50/50'
-                              : 'border-slate-300 text-slate-700'
-                          }`}
-                        />
+                        {isOpeningLotDay ? (
+                          <div
+                            title="Day 1 initial lot arrival is strictly locked"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border rounded font-mono font-bold bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed select-none"
+                          >
+                            🔒 Opening Lot
+                          </div>
+                        ) : isBeforeExpectedDate ? (
+                          <div
+                            title="Line prep lead time"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border border-dashed rounded font-mono font-bold bg-slate-50 text-slate-400 border-slate-300 cursor-not-allowed select-none"
+                          >
+                            🔒 Line Prep
+                          </div>
+                        ) : isSunday ? (
+                          <div
+                            title="Sunday is factory off-day"
+                            className="w-32 sm:w-36 px-2.5 py-1.5 text-xs text-center border rounded font-mono font-bold bg-rose-50 text-rose-500 border-rose-200 cursor-not-allowed select-none"
+                          >
+                            OFF (Sun)
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            placeholder="—"
+                            value={
+                              row.actualOutput !== null && row.actualOutput !== undefined
+                                ? row.actualOutput
+                                : ''
+                            }
+                            onChange={(e) =>
+                              handleCellChange(row.id, 'actualOutput', e.target.value)
+                            }
+                            onBlur={handleCellBlur}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                            }}
+                            className={`w-32 sm:w-36 px-2.5 py-1.5 text-xs sm:text-sm border rounded text-right font-mono font-bold transition-all ${
+                              (row.actualOutput || 0) > 0
+                                ? 'border-emerald-500 text-emerald-950 bg-emerald-50/50 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white'
+                                : 'border-slate-300 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white'
+                            }`}
+                          />
+                        )}
                       </td>
 
                       {/* CALCULATION OF EXPECTED AND ACTUAL DIFFERENCE (DIFF = ACTUAL - EXPECTED) */}

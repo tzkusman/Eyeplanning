@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { Challan, PlanningRow, PlanningTotals, UserProfile } from '@/types';
-import { FULL_MONTH_NAMES } from '@/lib/storage';
+import { FULL_MONTH_NAMES, getCalendarDayInfo } from '@/lib/storage';
 import { exportRegisterToExcel, exportRegisterToCSV } from '@/lib/exportUtils';
 import {
   Printer,
@@ -423,11 +423,9 @@ export function PrintRegisterModal({
                 <tbody className="divide-y divide-slate-300">
                   {targetRows.map((row, index) => {
                     const isFirstRow = index === 0;
-                    const dateObj = new Date(row.dateStr);
-                    const dayOfWeek = isNaN(dateObj.getTime())
-                      ? ''
-                      : dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-                    const isSunday = dayOfWeek === 'Sun';
+                    const dayInfo = getCalendarDayInfo(row.dateStr);
+                    const dayOfWeek = dayInfo.dayOfWeek;
+                    const isSunday = dayInfo.isSunday;
 
                     const hasActual =
                       row.actualOutput !== null &&

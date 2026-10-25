@@ -145,17 +145,23 @@ export async function POST(req: NextRequest) {
 
       const existing = consolidatedByDate.get(dateStr) || {};
 
-      const hasNewInput =
-        r.inputQty !== null && r.inputQty !== undefined && String(r.inputQty).trim() !== '';
-      const inputVal = hasNewInput ? Number(r.inputQty) : existing.inputQty ?? null;
+      let inputVal: number | null = null;
+      if (r.inputQty !== null && r.inputQty !== undefined && String(r.inputQty).trim() !== '') {
+        const parsed = Number(r.inputQty);
+        inputVal = isNaN(parsed) ? null : parsed;
+      }
 
-      const hasNewActual =
-        r.actualOutput !== null && r.actualOutput !== undefined && String(r.actualOutput).trim() !== '';
-      const actualVal = hasNewActual ? Number(r.actualOutput) : existing.actualOutput ?? null;
+      let actualVal: number | null = null;
+      if (r.actualOutput !== null && r.actualOutput !== undefined && String(r.actualOutput).trim() !== '') {
+        const parsed = Number(r.actualOutput);
+        actualVal = isNaN(parsed) ? null : parsed;
+      }
 
-      const hasNewExpected =
-        r.expectedOutput !== null && r.expectedOutput !== undefined && String(r.expectedOutput).trim() !== '';
-      const expVal = hasNewExpected ? Number(r.expectedOutput) : existing.expectedOutput ?? null;
+      let expVal: number | null = null;
+      if (r.expectedOutput !== null && r.expectedOutput !== undefined && String(r.expectedOutput).trim() !== '') {
+        const parsed = Number(r.expectedOutput);
+        expVal = isNaN(parsed) ? null : parsed;
+      }
 
       const statusVal = r.status ? String(r.status) : existing.status ?? 'Process';
       const notesVal = r.buyerNotes ? String(r.buyerNotes) : existing.buyerNotes ?? null;
@@ -276,6 +282,40 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error('Error in POST /api/planning:', err);
+    return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const challanId = searchParams.get('challanId');
+
+    if (!challanId) {
+      return NextResponse.json(
+        { success: false, error: 'challanId is required.' },
+        { status: 400 }
+      );
+    }
+
+    const { error } = await supabaseAdmin
+      .from('entries')
+      .delete()
+      .eq('challan_id', challanId);
+
+    if (error) {
+      console.error('Supabase DELETE entries error:', error);
+      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `All entries for challan ${challanId} deleted successfully.`,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error('Error in DELETE /api/planning:', err);
     return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });
   }
 }

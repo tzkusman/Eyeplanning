@@ -39,8 +39,11 @@ CREATE TABLE IF NOT EXISTS public.challans (
     dc_no TEXT NOT NULL UNIQUE,
     party TEXT NOT NULL,
     article TEXT,
+    item TEXT,
     opening_qty NUMERIC(12, 2) NOT NULL CHECK (opening_qty > 0),
     open_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    first_expected_date DATE,
+    daily_expected_rate INTEGER,
     remarks TEXT,
     status TEXT NOT NULL DEFAULT 'Process' CHECK (status IN ('Process', 'Inline', 'Complete', 'OPEN', 'CLOSED', 'VOID')),
     closed_date DATE,
@@ -49,6 +52,11 @@ CREATE TABLE IF NOT EXISTS public.challans (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
+
+-- Ensure columns exist if table was already created
+ALTER TABLE public.challans ADD COLUMN IF NOT EXISTS item TEXT;
+ALTER TABLE public.challans ADD COLUMN IF NOT EXISTS first_expected_date DATE;
+ALTER TABLE public.challans ADD COLUMN IF NOT EXISTS daily_expected_rate INTEGER;
 
 -- ---------------------------------------------------------------------
 -- 5. ENTRIES TABLE (DAILY PRODUCTION INPUT & OUTPUT ENTRIES)

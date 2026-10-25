@@ -3,7 +3,12 @@ import { supabaseAdmin } from '@/lib/supabaseServer';
 
 function cleanRemarks(remarksVal?: unknown): string | undefined {
   if (!remarksVal) return undefined;
-  const s = String(remarksVal).replace(/\[STITCHING:(Process|Inline|Complete)\]\s*/i, '').trim();
+  const s = String(remarksVal)
+    .replace(/\[STITCHING:(Process|Inline|Complete)\]\s*/gi, '')
+    .replace(/\[ITEM:[^\]]+\]\s*/gi, '')
+    .replace(/\[EXPECTED_START:[^\]]+\]\s*/gi, '')
+    .replace(/\[EXPECTED_RATE:\d+\]\s*/gi, '')
+    .trim();
   return s || undefined;
 }
 
@@ -14,7 +19,18 @@ export async function PUT(
   try {
     const { id } = await params;
     const body = await req.json();
-    const { dcNo, party, article, openingQty, orderDate, notes, status } = body;
+    const {
+      dcNo,
+      party,
+      article,
+      item,
+      openingQty,
+      orderDate,
+      firstExpectedDate,
+      dailyExpectedRate,
+      notes,
+      status,
+    } = body;
 
     const cleanStatus: 'Process' | 'Inline' | 'Complete' =
       status === 'Complete' || status === 'COMPLETED' || status === 'CLOSED'
@@ -24,14 +40,24 @@ export async function PUT(
         : 'Process';
 
     const cleanNotes = notes !== undefined ? String(notes).trim() : undefined;
+    const cleanItem = item !== undefined ? (item ? String(item).trim() : null) : undefined;
+    const cleanFirstExpectedDate =
+      firstExpectedDate !== undefined ? (firstExpectedDate ? String(firstExpectedDate).trim() : null) : undefined;
+    const cleanDailyExpectedRate =
+      dailyExpectedRate !== undefined
+        ? (dailyExpectedRate && Number(dailyExpectedRate) > 0 ? Number(dailyExpectedRate) : null)
+        : undefined;
 
-    // 1. Try updating directly with the StitchingStatus value
+    // 1. Try updating directly with the new columns
     const updatePayload: Record<string, unknown> = {
       dc_no: dcNo ? String(dcNo).trim().toUpperCase() : undefined,
       party: party ? String(party).trim() : undefined,
       article: article ? String(article).trim() : undefined,
+      item: cleanItem,
       opening_qty: openingQty ? Number(openingQty) : undefined,
       open_date: orderDate || undefined,
+      first_expected_date: cleanFirstExpectedDate,
+      daily_expected_rate: cleanDailyExpectedRate,
       remarks: cleanNotes !== undefined ? (cleanNotes || null) : undefined,
       status: cleanStatus,
       updated_at: new Date().toISOString(),
@@ -44,31 +70,56 @@ export async function PUT(
       .select()
       .single();
 
-    // 2. If check constraint fails in Supabase, gracefully fallback to OPEN/CLOSED + tagged remarks
-    if (error && (error.message.includes('challans_status_check') || error.code === '23514')) {
-      const fallbackStatus = cleanStatus === 'Complete' ? 'CLOSED' : 'OPEN';
-      const taggedRemarks = `[STITCHING:${cleanStatus}] ${cleanNotes || ''}`.trim();
+    // 2. If error due to missing columns or check constraint, fallback gracefully
+    if (error) {
+      const isMissingColumn =
+        error.code === '42703' ||
+        error.message.includes('column "item"') ||
+        error.message.includes('column "first_expected_date"') ||
+        error.message.includes('column "daily_expected_rate"');
+      const isConstraintErr =
+        error.message.includes('challans_status_check') || error.code === '23514';
 
-      const retry = await supabaseAdmin
-        .from('challans')
-        .update({
-          ...updatePayload,
-          status: fallbackStatus,
+      if (isMissingColumn || isConstraintErr) {
+        const fallbackStatus = isConstraintErr
+          ? cleanStatus === 'Complete'
+            ? 'CLOSED'
+            : 'OPEN'
+          : cleanStatus;
+
+        const metaTags = [
+          cleanStatus !== 'Process' ? `[STITCHING:${cleanStatus}]` : '',
+          cleanItem ? `[ITEM:${cleanItem}]` : '',
+          cleanFirstExpectedDate ? `[EXPECTED_START:${cleanFirstExpectedDate}]` : '',
+          cleanDailyExpectedRate ? `[EXPECTED_RATE:${cleanDailyExpectedRate}]` : '',
+        ].filter(Boolean).join(' ');
+
+        const taggedRemarks = [metaTags, cleanNotes || ''].filter(Boolean).join(' ').trim();
+
+        const fallbackPayload: Record<string, unknown> = {
+          dc_no: dcNo ? String(dcNo).trim().toUpperCase() : undefined,
+          party: party ? String(party).trim() : undefined,
+          article: article ? String(article).trim() : undefined,
+          opening_qty: openingQty ? Number(openingQty) : undefined,
+          open_date: orderDate || undefined,
           remarks: taggedRemarks || null,
-        })
-        .eq('id', id)
-        .select()
-        .single();
-
-      if (!retry.error && retry.data) {
-        data = {
-          ...retry.data,
-          status: cleanStatus,
-          remarks: cleanRemarks(retry.data.remarks),
+          status: fallbackStatus,
+          updated_at: new Date().toISOString(),
         };
-        error = null;
-      } else if (retry.error) {
-        error = retry.error;
+
+        const retry = await supabaseAdmin
+          .from('challans')
+          .update(fallbackPayload)
+          .eq('id', id)
+          .select()
+          .single();
+
+        if (!retry.error && retry.data) {
+          data = retry.data;
+          error = null;
+        } else if (retry.error) {
+          error = retry.error;
+        }
       }
     }
 
@@ -80,6 +131,9 @@ export async function PUT(
       success: true,
       data: {
         ...data,
+        item: cleanItem !== undefined ? cleanItem : data?.item,
+        firstExpectedDate: cleanFirstExpectedDate !== undefined ? cleanFirstExpectedDate : data?.first_expected_date,
+        dailyExpectedRate: cleanDailyExpectedRate !== undefined ? cleanDailyExpectedRate : data?.daily_expected_rate,
         status: cleanStatus,
         notes: cleanRemarks(data?.remarks),
       },

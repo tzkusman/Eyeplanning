@@ -37,7 +37,7 @@ export function Header({
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-sm">
       {/* Top utility ribbon */}
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-3 text-xs border-b border-slate-800/80">
+      <div className="w-full px-3 sm:px-6 lg:px-8 py-2 flex flex-wrap items-center justify-between gap-3 text-xs border-b border-slate-800/80">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-bold tracking-wider text-sky-400">
             {/* Custom EYE Vector SVG Branding */}
@@ -104,7 +104,7 @@ export function Header({
       </div>
 
       {/* Main navigation & DC Switcher */}
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-4">
+      <div className="w-full px-3 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-4">
         {/* Navigation Tabs */}
         <div className="flex items-center gap-1 sm:gap-2">
           <button

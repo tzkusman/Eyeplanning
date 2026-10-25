@@ -161,18 +161,29 @@ export default function HomePage() {
     let isMounted = true;
 
     async function initSessionAndData() {
+      // 1. Immediately read cached user from localStorage (0ms delay)
+      const cachedUser = getCurrentUser();
+      if (cachedUser) {
+        setCurrentUserState(cachedUser);
+        setIsCheckingAuth(false);
+      } else {
+        setIsCheckingAuth(false);
+      }
+
       try {
+        // 2. Verify session in background
         const verifiedUser = await verifyCurrentUserSession();
         if (!isMounted) return;
 
-        if (!verifiedUser) {
+        if (!verifiedUser && cachedUser) {
+          // Session was revoked on server
           setCurrentUserState(null);
-          setIsCheckingAuth(false);
           return;
         }
 
-        setCurrentUserState(verifiedUser);
-        setIsCheckingAuth(false);
+        if (verifiedUser) {
+          setCurrentUserState(verifiedUser);
+        }
 
         // Fetch real challans (via server API -> Supabase)
         const list = await getChallans();
@@ -451,14 +462,8 @@ export default function HomePage() {
         lastLiveSyncTime={lastLiveSyncTime}
       />
 
-      {/* Main Viewport Container - Edge-to-Edge Fluid for Date Register Ledger */}
-      <main
-        className={`flex-1 w-full mx-auto transition-all ${
-          activeView === 'register'
-            ? 'w-full max-w-none px-2 sm:px-4 lg:px-6 py-3 sm:py-5'
-            : 'max-w-7xl p-4 sm:p-6 lg:p-8'
-        }`}
-      >
+      {/* Main Viewport Container - Edge-to-Edge Responsive & Fluid across all views */}
+      <main className="flex-1 w-full px-2 sm:px-4 lg:px-6 py-3 sm:py-5 transition-all">
         {/* VIEW 1: PRODUCTION PLANNING REGISTER & BALANCES */}
         {activeView === 'register' && activeChallan && (
           <DateRegisterLedger

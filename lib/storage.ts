@@ -152,8 +152,11 @@ export const DEFAULT_CHALLANS: Challan[] = [
     dcNo: '3696',
     party: 'Line 1 - Front & Back Assembly',
     article: 'Denim Stretch 12.5oz Slim Fit',
+    item: 'Denim Jacket',
     openingQty: 5000,
     orderDate: '2026-11-11',
+    firstExpectedDate: '2026-11-12',
+    dailyExpectedRate: 800,
     notes: 'Primary export lot - Karachi Unit',
     status: 'Process',
     createdBy: 'usr-admin-1',
@@ -190,7 +193,7 @@ export function generateMonthDays(
   for (let day = startDay; day <= daysInMonth; day++) {
     const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     const dayLabel = `${day}-${monthAbbr}`;
-    const isFirstEntry = day === startDay;
+    const isFirstEntry = isOrderStartMonth && day === parsed.day;
 
     rows.push({
       id: `row_${challan.id}_${year}_${month}_${day}`,
@@ -238,16 +241,188 @@ export function formatDayLabel(dateStr: string): string {
   return `${d}-${MONTH_NAMES[m - 1]}`;
 }
 
+/**
+ * Adds an integer number of calendar days to a YYYY-MM-DD date string.
+ */
+export function addDaysToDateString(dateStr: string, days: number): string {
+  if (!dateStr || days <= 0) return dateStr;
+  const parts = dateStr.split('-').map(Number);
+  const d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  d.setUTCDate(d.getUTCDate() + days);
+  const ny = d.getUTCFullYear();
+  const nm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const nd = String(d.getUTCDate()).padStart(2, '0');
+  return `${ny}-${nm}-${nd}`;
+}
+
+export interface CalendarDayInfo {
+  year: number;
+  month: number;
+  day: number;
+  dayOfWeek: string; // 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'
+  isSunday: boolean;
+  isSaturday: boolean;
+  isWorkingDay: boolean; // Monday through Saturday are active factory production days!
+  dayIndex: number; // 0 = Sun, 1 = Mon, ..., 6 = Sat
+}
+
+/**
+ * Universal timezone-safe calendar day parser.
+ * Always resolves YYYY-MM-DD into the exact calendar day in UTC,
+ * preventing any browser or server local timezone offset from shifting dates backwards or skipping Saturdays!
+ */
+export function getCalendarDayInfo(dateStr: string): CalendarDayInfo {
+  if (!dateStr || typeof dateStr !== 'string') {
+    return {
+      year: 2026,
+      month: 1,
+      day: 1,
+      dayOfWeek: 'Thu',
+      isSunday: false,
+      isSaturday: false,
+      isWorkingDay: true,
+      dayIndex: 4,
+    };
+  }
+
+  const clean = dateStr.trim().split('T')[0];
+  const parts = clean.split('-').map(Number);
+  const y = parts[0] || 2026;
+  const m = parts[1] || 1;
+  const d = parts[2] || 1;
+
+  // Date.UTC guarantees absolute zero-drift calendar calculation
+  const utcDate = new Date(Date.UTC(y, m - 1, d));
+  const dayIndex = utcDate.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  return {
+    year: y,
+    month: m,
+    day: d,
+    dayOfWeek: dayNames[dayIndex],
+    isSunday: dayIndex === 0,
+    isSaturday: dayIndex === 6,
+    isWorkingDay: dayIndex !== 0, // Saturday IS a working day! Only Sunday is off-day!
+    dayIndex,
+  };
+}
+
+export interface ScheduleTimelineCalculation {
+  openingQty: number;
+  dailyRate: number;
+  startDate: string;
+  workingDaysNeeded: number;
+  calendarDaysSpan: number;
+  sundaysSkipped: number;
+  projectedEndDate: string;
+  projectedEndDisplay: string;
+  fullDays: number;
+  remainder: number;
+  dailyDistribution: Array<{
+    dateStr: string;
+    dayLabel: string;
+    expectedOutput: number | null;
+    isSunday: boolean;
+  }>;
+}
+
+/**
+ * Pure deterministic calculation engine for production output timelines.
+ * Calculates exact working days, Sunday skips, remainder allotment, and projected calendar completion date.
+ * SATURDAY IS ALWAYS A WORKING PRODUCTION DAY. Only Sundays are off-days!
+ */
+export function calculateScheduleTimeline(
+  openingQty: number,
+  dailyRate: number,
+  startDateStr: string
+): ScheduleTimelineCalculation | null {
+  if (!openingQty || openingQty <= 0 || !dailyRate || dailyRate <= 0 || !startDateStr) {
+    return null;
+  }
+
+  const workingDaysNeeded = Math.ceil(openingQty / dailyRate);
+  const fullDays = Math.floor(openingQty / dailyRate);
+  const remainder = openingQty % dailyRate;
+
+  let remaining = openingQty;
+  let allocatedWorkingDays = 0;
+  let currDate = startDateStr.trim().split('T')[0];
+  let sundaysSkipped = 0;
+  let calendarDaysSpan = 0;
+  const dailyDistribution: Array<{
+    dateStr: string;
+    dayLabel: string;
+    expectedOutput: number | null;
+    isSunday: boolean;
+  }> = [];
+
+  let safety = 365;
+  while (remaining > 0 && allocatedWorkingDays < workingDaysNeeded && safety > 0) {
+    safety--;
+    calendarDaysSpan++;
+    const dayInfo = getCalendarDayInfo(currDate);
+
+    if (dayInfo.isSunday) {
+      sundaysSkipped++;
+      dailyDistribution.push({
+        dateStr: currDate,
+        dayLabel: formatDayLabel(currDate),
+        expectedOutput: null,
+        isSunday: true,
+      });
+    } else {
+      allocatedWorkingDays++;
+      let quota = dailyRate;
+      if (allocatedWorkingDays === workingDaysNeeded || remaining <= dailyRate) {
+        quota = remaining;
+        remaining = 0;
+      } else {
+        remaining -= dailyRate;
+      }
+      dailyDistribution.push({
+        dateStr: currDate,
+        dayLabel: formatDayLabel(currDate),
+        expectedOutput: quota,
+        isSunday: false,
+      });
+    }
+
+    if (remaining > 0) {
+      currDate = getNextDateString(currDate);
+    }
+  }
+
+  const projectedEndDate = dailyDistribution[dailyDistribution.length - 1]?.dateStr || currDate;
+  const endDayInfo = getCalendarDayInfo(projectedEndDate);
+  const projectedEndDisplay = `${endDayInfo.dayOfWeek}, ${endDayInfo.day}-${MONTH_NAMES[endDayInfo.month - 1]}-${endDayInfo.year}`;
+
+  return {
+    openingQty,
+    dailyRate,
+    startDate: startDateStr,
+    workingDaysNeeded,
+    calendarDaysSpan,
+    sundaysSkipped,
+    projectedEndDate,
+    projectedEndDisplay,
+    fullDays,
+    remainder,
+    dailyDistribution,
+  };
+}
+
 export function buildRowForDate(
   challan: Challan,
   dateStr: string,
   isFirstOfOrder: boolean = false
 ): PlanningRow {
-  const parts = dateStr.split('-').map(Number);
-  const y = parts[0];
-  const m = parts[1];
-  const d = parts[2];
-  const dayLabel = formatDayLabel(dateStr);
+  const cleanDate = dateStr.trim().split('T')[0];
+  const dayInfo = getCalendarDayInfo(cleanDate);
+  const y = dayInfo.year;
+  const m = dayInfo.month;
+  const d = dayInfo.day;
+  const dayLabel = formatDayLabel(cleanDate);
 
   return {
     id: `row_${challan.id}_${y}_${m}_${d}`,
@@ -255,7 +430,7 @@ export function buildRowForDate(
     year: y,
     month: m,
     dayNumber: d,
-    dateStr,
+    dateStr: cleanDate,
     dayLabel,
     dcNo: isFirstOfOrder ? challan.dcNo : undefined,
     qty: isFirstOfOrder ? challan.openingQty : null,
@@ -266,9 +441,45 @@ export function buildRowForDate(
     actualOutput: null,
     balance: challan.openingQty,
     isZeroBalance: false,
-    sortOrder: new Date(dateStr).getTime(),
+    sortOrder: d,
     status: 'Process',
   };
+}
+
+/**
+ * Fills any calendar date gaps in an array of PlanningRows.
+ * Guarantees that every consecutive calendar day from earliest to latest date is present!
+ * (e.g. 29-Oct, 30-Oct, 31-Oct, 1-Nov, 2-Nov, 3-Nov... with NO missing days).
+ */
+export function fillDateGapsInRows(challan: Challan, currentRows: PlanningRow[]): PlanningRow[] {
+  if (!currentRows || currentRows.length <= 1) return currentRows;
+
+  const sorted = [...currentRows].sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+  const dateMap = new Map<string, PlanningRow>();
+  sorted.forEach((r) => {
+    const d = (r.dateStr || '').trim().split('T')[0];
+    if (d) dateMap.set(d, r);
+  });
+
+  const firstDate = sorted[0].dateStr.trim().split('T')[0];
+  const lastDate = sorted[sorted.length - 1].dateStr.trim().split('T')[0];
+
+  let curr = firstDate;
+  const completeRows: PlanningRow[] = [];
+  let safety = 365;
+
+  while (curr <= lastDate && safety > 0) {
+    safety--;
+    const existing = dateMap.get(curr);
+    if (existing) {
+      completeRows.push(existing);
+    } else {
+      completeRows.push(buildRowForDate(challan, curr, false));
+    }
+    curr = getNextDateString(curr);
+  }
+
+  return completeRows;
 }
 
 /**
@@ -366,6 +577,9 @@ export function recalculatePlanningRows(
   );
 
   const updatedRows = sorted.map((row, index) => {
+    // Opening lot arrival day is locked: cut panels and fabric arrive today, output begins on Day 2
+    const isOpeningDay = index === 0 || (row.qty !== null && row.qty !== undefined && Number(row.qty) > 0);
+
     // First active entry of order seeds starting balance
     if (index === 0) {
       const firstInput =
@@ -386,18 +600,23 @@ export function recalculatePlanningRows(
       runningBalance += extra;
     }
 
-    // Expected output planned quota
-    if (
-      row.expectedOutput !== null &&
-      row.expectedOutput !== undefined &&
-      Number(row.expectedOutput) > 0
-    ) {
-      totalExpected += Number(row.expectedOutput);
+    // Expected output planned quota (locked to null on opening lot arrival day)
+    const validExpected = isOpeningDay
+      ? null
+      : row.expectedOutput !== null &&
+        row.expectedOutput !== undefined &&
+        Number(row.expectedOutput) > 0
+      ? Number(row.expectedOutput)
+      : null;
+
+    if (validExpected !== null && validExpected > 0) {
+      totalExpected += validExpected;
     }
 
     // True calendar day gap from last active output across month boundaries
     let calculatedGap = 0;
     if (
+      !isOpeningDay &&
       row.actualOutput !== null &&
       row.actualOutput !== undefined &&
       Number(row.actualOutput) > 0
@@ -411,14 +630,19 @@ export function recalculatePlanningRows(
       lastActiveDateStr = row.dateStr;
     }
 
-    // Actual output achieved on floor
-    if (row.actualOutput !== null && row.actualOutput !== undefined) {
-      const actual = Number(row.actualOutput);
-      totalActual += actual;
-      if (actual > 0) {
+    // Actual output achieved on floor (locked to null on opening lot arrival day)
+    const validActual = isOpeningDay
+      ? null
+      : row.actualOutput !== null && row.actualOutput !== undefined
+      ? Number(row.actualOutput)
+      : null;
+
+    if (validActual !== null) {
+      totalActual += validActual;
+      if (validActual > 0) {
         daysWithOutput++;
       }
-      runningBalance = Math.max(0, runningBalance - actual);
+      runningBalance = Math.max(0, runningBalance - validActual);
     }
 
     const isZero = runningBalance === 0 && (totalActual > 0 || totalInput > 0);
@@ -473,6 +697,9 @@ export function recalculatePlanningRows(
 
 // 1. CHALLANS CRUD
 export async function getChallans(): Promise<Challan[]> {
+  if (typeof window === 'undefined') {
+    return DEFAULT_CHALLANS;
+  }
   try {
     const res = await fetch('/api/challans', { cache: 'no-store' });
     const json = await res.json();
@@ -511,9 +738,130 @@ export async function getChallans(): Promise<Challan[]> {
   return DEFAULT_CHALLANS;
 }
 
+/**
+ * Auto-schedules expected outputs starting strictly from firstExpectedDate.
+ * Follows the formula: Math.ceil(Balance / Rate) days needed, skips Sundays (off-day),
+ * and puts the remaining balance on the final day so total matches opening QTY.
+ */
+export function generateAutoScheduledRows(challan: Challan): PlanningRow[] {
+  const parsedStart = parseOrderDate(challan.orderDate);
+  const startYear = parsedStart.year;
+  const startMonth = parsedStart.month;
+
+  let rows = generateMonthDays(challan, startYear, startMonth);
+
+  const balance = challan.openingQty || 5000;
+  const targetRate =
+    challan.dailyExpectedRate && challan.dailyExpectedRate > 0
+      ? challan.dailyExpectedRate
+      : 622;
+  const expectedStartDate = (
+    challan.firstExpectedDate ||
+    challan.orderDate ||
+    new Date().toISOString().split('T')[0]
+  ).trim().split('T')[0];
+
+  // Ensure rows extend from orderDate up to at least expectedStartDate
+  let maxPrep = 120;
+  while (maxPrep > 0) {
+    maxPrep--;
+    const sorted = [...rows].sort(
+      (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+    );
+    const last = sorted[sorted.length - 1];
+    if (!last || new Date(last.dateStr).getTime() >= new Date(expectedStartDate).getTime()) {
+      break;
+    }
+    const nextD = getNextDateString(last.dateStr);
+    rows.push(buildRowForDate(challan, nextD, false));
+  }
+
+  const timeline = calculateScheduleTimeline(balance, targetRate, expectedStartDate);
+  if (timeline) {
+    timeline.dailyDistribution.forEach((item) => {
+      let existing = rows.find((r) => r.dateStr === item.dateStr);
+      if (!existing) {
+        existing = buildRowForDate(challan, item.dateStr, false);
+        rows.push(existing);
+      }
+      existing.expectedOutput = item.expectedOutput;
+    });
+  }
+
+  // Deduplicate and sort chronologically
+  const map = new Map<string, PlanningRow>();
+  rows.forEach((r) => {
+    const d = (r.dateStr || '').split('T')[0];
+    if (d) map.set(d, { ...r, dateStr: d });
+  });
+
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+  );
+}
+
+/**
+ * Calculates current balance, extra input, actual output, and completion stats for any challan.
+ */
+export function getLocalChallanBalance(challan: Challan): {
+  totalInput: number;
+  totalActual: number;
+  remainingBalance: number;
+  completionRate: number;
+} {
+  if (challan.status === 'Complete') {
+    return {
+      totalInput: challan.openingQty,
+      totalActual: challan.openingQty,
+      remainingBalance: 0,
+      completionRate: 100,
+    };
+  }
+
+  if (challan.remainingBalance !== undefined && challan.completionRate !== undefined) {
+    return {
+      totalInput: challan.openingQty,
+      totalActual: challan.totalActualOutput || 0,
+      remainingBalance: challan.remainingBalance,
+      completionRate: challan.completionRate,
+    };
+  }
+
+  // Fallback to checking cached local storage rows
+  if (typeof window !== 'undefined') {
+    const parsed = parseOrderDate(challan.orderDate);
+    const key = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_${parsed.year}_${parsed.month}`;
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      try {
+        const rows: PlanningRow[] = JSON.parse(raw);
+        if (Array.isArray(rows) && rows.length > 0) {
+          const rec = recalculatePlanningRows(rows, challan.openingQty);
+          return {
+            totalInput: rec.totals.targetInput,
+            totalActual: rec.totals.totalActualOutput,
+            remainingBalance: rec.totals.currentBalance,
+            completionRate: rec.totals.completionRate,
+          };
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return {
+    totalInput: challan.openingQty,
+    totalActual: 0,
+    remainingBalance: challan.openingQty,
+    completionRate: 0,
+  };
+}
+
 export async function createChallan(
   challan: Challan
 ): Promise<{ success: boolean; challan: Challan; error?: string }> {
+  let createdChallan: Challan = challan;
   try {
     const res = await fetch('/api/challans', {
       method: 'POST',
@@ -522,37 +870,49 @@ export async function createChallan(
     });
     const json = await res.json();
     if (json.success && json.data) {
-      const created: Challan = {
+      createdChallan = {
         ...json.data,
         status: normalizeStitchingStatus(json.data.status),
       };
-      const current = await getChallans();
-      const updated = [
-        created,
-        ...current.filter((c) => c.id !== created.id && c.dcNo !== created.dcNo),
-      ];
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(updated));
-        broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: created.id }).catch(() => {});
-      }
-      return { success: true, challan: created };
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('Error creating challan via server API:', msg);
   }
 
-  // Local fallback
+  // Update local challans cache
   const current = await getChallans();
-  const next = [
-    challan,
-    ...current.filter((c) => c.id !== challan.id && c.dcNo !== challan.dcNo),
+  const updated = [
+    createdChallan,
+    ...current.filter((c) => c.id !== createdChallan.id && c.dcNo !== createdChallan.dcNo),
   ];
   if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(next));
-    broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: challan.id }).catch(() => {});
+    localStorage.setItem(STORAGE_KEYS.CHALLANS, JSON.stringify(updated));
+    broadcastLiveChange({ type: 'CHALLAN_UPDATE', challanId: createdChallan.id }).catch(() => {});
   }
-  return { success: true, challan };
+
+  // Generate and AWAIT initial auto-scheduled expected quota rows!
+  if (
+    createdChallan.firstExpectedDate &&
+    createdChallan.dailyExpectedRate &&
+    createdChallan.dailyExpectedRate > 0
+  ) {
+    try {
+      const initialRows = generateAutoScheduledRows(createdChallan);
+      const parsed = parseOrderDate(createdChallan.orderDate);
+      if (typeof window !== 'undefined') {
+        const key = `${STORAGE_KEYS.PLANNING_PREFIX}${createdChallan.id}_${parsed.year}_${parsed.month}`;
+        localStorage.setItem(key, JSON.stringify(initialRows));
+        const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${createdChallan.id}`;
+        localStorage.setItem(extKey, JSON.stringify(initialRows.map((r) => r.dateStr)));
+      }
+      await savePlanningSchedule(createdChallan.id, parsed.year, parsed.month, initialRows);
+    } catch (e) {
+      console.warn('Initial auto schedule save note (cached locally):', e);
+    }
+  }
+
+  return { success: true, challan: createdChallan };
 }
 
 export async function updateChallan(challan: Challan): Promise<void> {
@@ -598,6 +958,9 @@ export async function getPlanningSchedule(
   month: number
 ): Promise<PlanningRow[]> {
   const defaultRows = generateMonthDays(challan, year, month);
+  if (typeof window === 'undefined') {
+    return defaultRows;
+  }
 
   try {
     const res = await fetch(
@@ -684,7 +1047,30 @@ export async function getPlanningSchedule(
       uniqueMerged.sort(
         (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
       );
-      return uniqueMerged;
+
+      // If no expected output has been recorded yet, and firstExpectedDate + dailyExpectedRate are set, blend auto-schedule
+      const hasAnyExpectedOutput = uniqueMerged.some(
+        (r) => r.expectedOutput !== null && r.expectedOutput !== undefined && Number(r.expectedOutput) > 0
+      );
+      if (!hasAnyExpectedOutput) {
+        const autoRows = generateAutoScheduledRows(challan);
+        const autoMap = new Map(autoRows.map((r) => [r.dateStr, r.expectedOutput]));
+        for (const r of uniqueMerged) {
+          if (autoMap.has(r.dateStr)) {
+            r.expectedOutput = autoMap.get(r.dateStr) ?? null;
+          }
+        }
+        for (const ar of autoRows) {
+          if (!uniqueMerged.some((r) => r.dateStr === ar.dateStr)) {
+            uniqueMerged.push(ar);
+          }
+        }
+        uniqueMerged.sort(
+          (a, b) => a.dateStr.localeCompare(b.dateStr)
+        );
+      }
+
+      return fillDateGapsInRows(challan, uniqueMerged);
     }
   } catch (err) {
     console.warn(
@@ -713,9 +1099,26 @@ export async function getPlanningSchedule(
             }
             cleaned.push({ ...r, dateStr: normDate, inputQty: inputVal });
           }
-          return cleaned.sort(
-            (a, b) => new Date(a.dateStr).getTime() - new Date(b.dateStr).getTime()
+          const sorted = cleaned.sort(
+            (a, b) => a.dateStr.localeCompare(b.dateStr)
           );
+
+          if (
+            !sorted.some((r) => r.expectedOutput !== null && r.expectedOutput !== undefined && Number(r.expectedOutput) > 0) &&
+            challan.firstExpectedDate &&
+            challan.dailyExpectedRate &&
+            challan.dailyExpectedRate > 0
+          ) {
+            const autoRows = generateAutoScheduledRows(challan);
+            const autoMap = new Map(autoRows.map((r) => [r.dateStr, r.expectedOutput]));
+            for (const r of sorted) {
+              if (autoMap.has(r.dateStr)) {
+                r.expectedOutput = autoMap.get(r.dateStr) ?? null;
+              }
+            }
+          }
+
+          return fillDateGapsInRows(challan, sorted);
         }
       } catch {
         // ignore
@@ -723,7 +1126,11 @@ export async function getPlanningSchedule(
     }
   }
 
-  return defaultRows;
+  if (challan.firstExpectedDate && challan.dailyExpectedRate && challan.dailyExpectedRate > 0) {
+    return fillDateGapsInRows(challan, generateAutoScheduledRows(challan));
+  }
+
+  return fillDateGapsInRows(challan, defaultRows);
 }
 
 export async function savePlanningSchedule(
@@ -782,8 +1189,45 @@ export async function savePlanningSchedule(
   }
 }
 
+/**
+ * Resets all planning entries for a challan:
+ * Clears database records via DELETE API, purges localStorage cache,
+ * and returns clean, pristine month rows with Day 1 locked and empty manual cells.
+ */
+export async function resetChallanPlanningEntries(
+  challan: Challan,
+  year: number,
+  month: number
+): Promise<PlanningRow[]> {
+  try {
+    await fetch(`/api/planning?challanId=${challan.id}`, { method: 'DELETE' });
+  } catch (err) {
+    console.error('Error deleting planning entries from API:', err);
+  }
+
+  if (typeof window !== 'undefined') {
+    const prefix = `${STORAGE_KEYS.PLANNING_PREFIX}${challan.id}_`;
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+    const extKey = `${STORAGE_KEYS.EXTENDED_DATES_PREFIX}${challan.id}`;
+    localStorage.removeItem(extKey);
+    broadcastLiveChange({ type: 'PLAN_UPDATE', challanId: challan.id }).catch(() => {});
+  }
+
+  return generateMonthDays(challan, year, month);
+}
+
 // 3. USER MANAGEMENT & AUTH (Backed by Supabase API)
 export async function getRemoteUsers(): Promise<UserProfile[]> {
+  if (typeof window === 'undefined') {
+    return DEFAULT_USERS;
+  }
   try {
     const res = await fetch('/api/users');
     if (res.ok) {
@@ -966,16 +1410,7 @@ export function getLocalUsers(): UserProfile[] {
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          // Filter out legacy personal credentials if cached in browser
-          const cleaned = parsed.filter(
-            (u) =>
-              u.email !== 'tzkusman786@gmail.com' &&
-              u.email !== 'usman@gmail.com'
-          );
-          if (cleaned.length !== parsed.length) {
-            localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(cleaned));
-          }
-          return cleaned.length > 0 ? cleaned : DEFAULT_USERS;
+          return parsed;
         }
       } catch {
         // ignore
@@ -1003,15 +1438,9 @@ export function getCurrentUser(): UserProfile | null {
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        // Clear any stored legacy personal email
-        if (
-          parsed &&
-          (parsed.email === 'tzkusman786@gmail.com' || parsed.email === 'usman@gmail.com')
-        ) {
-          localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-          return null;
+        if (parsed && parsed.email) {
+          return parsed;
         }
-        return parsed;
       } catch {
         // ignore
       }

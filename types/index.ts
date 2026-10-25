@@ -17,13 +17,19 @@ export interface Challan {
   dcNo: string;
   party: string;
   article: string;
+  item?: string; // e.g. "Skirt", "Jacket", "Denim Pants", "Shorts"
   openingQty: number;
   orderDate: string; // YYYY-MM-DD or DD-MM-YYYY or DD-MM-YY
+  firstExpectedDate?: string; // Date when expected output quota starts (YYYY-MM-DD)
+  dailyExpectedRate?: number; // Daily expected output rate (e.g. 800 pcs/day)
   notes?: string;
   status: StitchingStatus;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  totalActualOutput?: number;
+  remainingBalance?: number;
+  completionRate?: number;
 }
 
 export interface MonthlyTarget {

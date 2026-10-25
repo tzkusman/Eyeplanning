@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { Challan, PlanningRow, PlanningTotals, StitchingStatus } from '@/types';
-import { FULL_MONTH_NAMES } from './storage';
+import { FULL_MONTH_NAMES, getCalendarDayInfo } from './storage';
 
 interface ExportRegisterOptions {
   challan: Challan;
@@ -235,11 +235,9 @@ export async function exportRegisterToExcel({
 
   targetRows.forEach((row, index) => {
     const isFirstRow = index === 0;
-    const dateObj = new Date(row.dateStr);
-    const dayOfWeek = isNaN(dateObj.getTime())
-      ? ''
-      : dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-    const isSunday = dayOfWeek === 'Sun';
+    const dayInfo = getCalendarDayInfo(row.dateStr);
+    const dayOfWeek = dayInfo.dayOfWeek;
+    const isSunday = dayInfo.isSunday;
 
     const hasActual = row.actualOutput !== null && row.actualOutput !== undefined;
     const hasExpected = row.expectedOutput !== null && row.expectedOutput !== undefined;
@@ -639,12 +637,14 @@ export async function exportChallansToExcel(challans: Challan[]) {
   // Table Headers
   const headers = [
     { col: 'A', text: 'DC Number', width: 16 },
-    { col: 'B', text: 'Line or Assembly', width: 32 },
-    { col: 'C', text: 'Article / Style', width: 24 },
-    { col: 'D', text: 'Opening Qty (Pcs)', width: 18 },
-    { col: 'E', text: 'Order Date', width: 16 },
-    { col: 'F', text: 'Status', width: 16 },
-    { col: 'G', text: 'Notes', width: 32 },
+    { col: 'B', text: 'Line or Assembly', width: 30 },
+    { col: 'C', text: 'Article / Style', width: 22 },
+    { col: 'D', text: 'Item', width: 18 },
+    { col: 'E', text: 'Opening Qty (Pcs)', width: 18 },
+    { col: 'F', text: 'Remaining Balance', width: 20 },
+    { col: 'G', text: 'Order Date', width: 16 },
+    { col: 'H', text: 'Status', width: 16 },
+    { col: 'I', text: 'Notes', width: 30 },
   ];
 
   headers.forEach((h) => {
@@ -652,7 +652,7 @@ export async function exportChallansToExcel(challans: Challan[]) {
     c.value = h.text;
     c.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_DARK } };
-    c.alignment = { vertical: 'middle', horizontal: h.col === 'D' ? 'right' : 'left' };
+    c.alignment = { vertical: 'middle', horizontal: h.col === 'E' || h.col === 'F' ? 'right' : 'left' };
     c.border = thinBorder;
   });
   worksheet.getRow(4).height = 24;
@@ -685,40 +685,55 @@ export async function exportChallansToExcel(challans: Challan[]) {
     cellC.border = thinBorder;
 
     const cellD = worksheet.getCell(`D${rIdx}`);
-    cellD.value = c.openingQty;
-    cellD.numFmt = '#,##0';
-    cellD.font = { name: 'Calibri', size: 9, bold: true };
-    cellD.alignment = { horizontal: 'right' };
+    cellD.value = c.item || '-';
+    cellD.font = { name: 'Calibri', size: 9, bold: Boolean(c.item) };
     cellD.fill = fill;
     cellD.border = thinBorder;
 
     const cellE = worksheet.getCell(`E${rIdx}`);
-    cellE.value = c.orderDate;
-    cellE.font = { name: 'Calibri', size: 9 };
+    cellE.value = c.openingQty;
+    cellE.numFmt = '#,##0';
+    cellE.font = { name: 'Calibri', size: 9, bold: true };
+    cellE.alignment = { horizontal: 'right' };
     cellE.fill = fill;
     cellE.border = thinBorder;
 
     const cellF = worksheet.getCell(`F${rIdx}`);
-    cellF.value = c.status;
-    cellF.alignment = { horizontal: 'center' };
-    cellF.font = { name: 'Calibri', size: 9, bold: true };
-    if (c.status === 'Complete') {
-      cellF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
-      cellF.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FF15803D' } };
-    } else if (c.status === 'Inline') {
-      cellF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDBEAFE' } };
-      cellF.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FF1D4ED8' } };
-    } else {
-      cellF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
-      cellF.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FFB45309' } };
-    }
+    const remBal = c.remainingBalance !== undefined ? c.remainingBalance : (c.status === 'Complete' ? 0 : c.openingQty);
+    cellF.value = remBal;
+    cellF.numFmt = '#,##0';
+    cellF.font = { name: 'Calibri', size: 9, bold: true, color: { argb: remBal === 0 ? 'FF15803D' : 'FF0F172A' } };
+    cellF.alignment = { horizontal: 'right' };
+    cellF.fill = fill;
     cellF.border = thinBorder;
 
     const cellG = worksheet.getCell(`G${rIdx}`);
-    cellG.value = c.notes || '';
-    cellG.font = { name: 'Calibri', size: 9, italic: true };
+    cellG.value = c.orderDate;
+    cellG.font = { name: 'Calibri', size: 9 };
     cellG.fill = fill;
     cellG.border = thinBorder;
+
+    const cellH = worksheet.getCell(`H${rIdx}`);
+    cellH.value = c.status;
+    cellH.alignment = { horizontal: 'center' };
+    cellH.font = { name: 'Calibri', size: 9, bold: true };
+    if (c.status === 'Complete') {
+      cellH.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+      cellH.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FF15803D' } };
+    } else if (c.status === 'Inline') {
+      cellH.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDBEAFE' } };
+      cellH.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FF1D4ED8' } };
+    } else {
+      cellH.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+      cellH.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FFB45309' } };
+    }
+    cellH.border = thinBorder;
+
+    const cellI = worksheet.getCell(`I${rIdx}`);
+    cellI.value = c.notes || '';
+    cellI.font = { name: 'Calibri', size: 9, italic: true };
+    cellI.fill = fill;
+    cellI.border = thinBorder;
 
     worksheet.getRow(rIdx).height = 20;
     rIdx++;
@@ -810,10 +825,8 @@ export function exportRegisterToCSV({
 
   targetRows.forEach((row, index) => {
     const isFirstRow = index === 0;
-    const dateObj = new Date(row.dateStr);
-    const dayOfWeek = isNaN(dateObj.getTime())
-      ? ''
-      : dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+    const dayInfo = getCalendarDayInfo(row.dateStr);
+    const dayOfWeek = dayInfo.dayOfWeek;
 
     const hasActual = row.actualOutput !== null && row.actualOutput !== undefined;
     const hasExpected = row.expectedOutput !== null && row.expectedOutput !== undefined;
