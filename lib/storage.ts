@@ -17,9 +17,22 @@ const memoryFallbackStore = new Map<string, string>();
 
 export const safeStorage = {
   getItem: (key: string): string | null => {
+    // CRITICAL SECURITY: During SSR, never return client session data from server memory!
+    if (typeof window === 'undefined') {
+      return null;
+    }
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        return window.localStorage.getItem(key);
+      if (window.sessionStorage) {
+        const val = window.sessionStorage.getItem(key);
+        if (val !== null) return val;
+      }
+    } catch {
+      // Storage restricted
+    }
+    try {
+      if (window.localStorage) {
+        const val = window.localStorage.getItem(key);
+        if (val !== null) return val;
       }
     } catch {
       // Storage restricted / sandboxed iframe
@@ -27,19 +40,38 @@ export const safeStorage = {
     return memoryFallbackStore.get(key) || null;
   },
   setItem: (key: string, value: string): void => {
+    if (typeof window === 'undefined') return;
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
+      if (window.localStorage) {
         window.localStorage.setItem(key, value);
       }
     } catch {
       // Storage restricted / sandboxed iframe
     }
+    try {
+      if (window.sessionStorage) {
+        window.sessionStorage.setItem(key, value);
+      }
+    } catch {
+      // Storage restricted
+    }
     memoryFallbackStore.set(key, value);
   },
   removeItem: (key: string): void => {
+    if (typeof window === 'undefined') {
+      memoryFallbackStore.delete(key);
+      return;
+    }
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
+      if (window.localStorage) {
         window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Storage restricted
+    }
+    try {
+      if (window.sessionStorage) {
+        window.sessionStorage.removeItem(key);
       }
     } catch {
       // Storage restricted
@@ -47,8 +79,9 @@ export const safeStorage = {
     memoryFallbackStore.delete(key);
   },
   clearPrefix: (prefix: string): void => {
+    if (typeof window === 'undefined') return;
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
+      if (window.localStorage) {
         const toRemove: string[] = [];
         for (let i = 0; i < window.localStorage.length; i++) {
           const k = window.localStorage.key(i);
@@ -57,6 +90,20 @@ export const safeStorage = {
           }
         }
         toRemove.forEach((k) => window.localStorage.removeItem(k));
+      }
+    } catch {
+      // Storage restricted
+    }
+    try {
+      if (window.sessionStorage) {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+          const k = window.sessionStorage.key(i);
+          if (k && k.startsWith(prefix)) {
+            toRemove.push(k);
+          }
+        }
+        toRemove.forEach((k) => window.sessionStorage.removeItem(k));
       }
     } catch {
       // Storage restricted
@@ -1448,11 +1495,23 @@ export function saveLocalUser(user: UserProfile): void {
 }
 
 export function getCurrentUser(): UserProfile | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  // Check if explicit logout flag is active
+  try {
+    const isLoggedOut = safeStorage.getItem('eye_erp_logged_out');
+    if (isLoggedOut === 'true') {
+      return null;
+    }
+  } catch {}
+
   const raw = safeStorage.getItem(STORAGE_KEYS.CURRENT_USER);
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      if (parsed && parsed.email) {
+      if (parsed && parsed.email && parsed.id) {
         return parsed;
       }
     } catch {
@@ -1464,9 +1523,23 @@ export function getCurrentUser(): UserProfile | null {
 
 export function setCurrentUser(user: UserProfile | null): void {
   if (user) {
+    safeStorage.removeItem('eye_erp_logged_out');
     safeStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
   } else {
+    // Explicit, irreversible logout
     safeStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+    safeStorage.setItem('eye_erp_logged_out', 'true');
+    // Clear directly across browser storages
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage?.removeItem(STORAGE_KEYS.CURRENT_USER);
+        window.localStorage?.setItem('eye_erp_logged_out', 'true');
+      } catch {}
+      try {
+        window.sessionStorage?.removeItem(STORAGE_KEYS.CURRENT_USER);
+        window.sessionStorage?.setItem('eye_erp_logged_out', 'true');
+      } catch {}
+    }
   }
 }
 

@@ -51,7 +51,8 @@ export default function HomePage() {
   const [month, setMonth] = useState<number>(() => getSavedMonth());
 
   const [planningRows, setPlanningRows] = useState<PlanningRow[]>([]);
-  const [currentUser, setCurrentUserState] = useState<UserProfile | null>(() => getCurrentUser() || DEFAULT_USERS[0]);
+  const [currentUser, setCurrentUserState] = useState<UserProfile | null>(() => getCurrentUser());
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [users, setUsers] = useState<UserProfile[]>(() => getLocalUsers());
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isNewDCModalOpen, setIsNewDCModalOpen] = useState(false);
@@ -161,13 +162,33 @@ export default function HomePage() {
     let isMounted = true;
 
     async function initSessionAndData() {
-      // 1. Ensure current user is loaded
-      const user = getCurrentUser() || DEFAULT_USERS[0];
-      if (user && isMounted) {
+      // 1. Check if user is authenticated
+      const user = getCurrentUser();
+      if (!user) {
+        // Logged out: stay on LoginPage, do not auto-login
+        if (isMounted) {
+          setCurrentUserState(null);
+          setIsAuthChecking(false);
+        }
+        return;
+      }
+      if (isMounted) {
         setCurrentUserState(user);
+        setIsAuthChecking(false);
       }
 
       try {
+        // Validate session with server in background
+        const verifiedUser = await verifyCurrentUserSession();
+        if (!isMounted) return;
+        if (!verifiedUser) {
+          // Session was revoked or deleted on server
+          setCurrentUser(null);
+          setCurrentUserState(null);
+          return;
+        }
+        setCurrentUserState(verifiedUser);
+
         // Fetch real challans (via server API -> Supabase)
         const list = await getChallans();
         if (!isMounted) return;
@@ -365,12 +386,15 @@ export default function HomePage() {
   const handleLogout = () => {
     setCurrentUser(null);
     setCurrentUserState(null);
+    setIsAuthChecking(false);
     setIsLoginModalOpen(false);
   };
 
   // User Login Success
   const handleLoginSuccess = async (user: UserProfile) => {
+    setCurrentUser(user);
     setCurrentUserState(user);
+    setIsAuthChecking(false);
     setIsLoginModalOpen(false);
 
     try {
@@ -400,7 +424,20 @@ export default function HomePage() {
   // Active Challan
   const activeChallan = challans.find((c) => c.id === activeDCId) || challans[0];
 
-  // Gateway: If explicitly logged out, show login page; otherwise render ERP app
+  // Gateway: If checking initial authentication state, render loading splash
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+        <div className="flex items-center gap-3 text-sky-400">
+          <EyeLogo size={32} className="text-sky-400 animate-pulse" />
+          <span className="text-white font-black text-sm tracking-wider uppercase">Eye Planning</span>
+          <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+        </div>
+      </div>
+    );
+  }
+
+  // Gateway: If explicitly logged out or unauthenticated, show LoginPage; otherwise render ERP app
   if (!currentUser) {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }
